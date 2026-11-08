@@ -123,7 +123,15 @@ function normalizeBase(b) {
   if (!/^https?:\/\//i.test(b)) b = 'https://' + b;           // "api.deepseek.com" -> absolute URL
   return b.replace(/\/+$/, '').replace(/\/(chat\/completions|messages)$/i, '').replace(/\/models\/[^/]*$/i, '');
 }
-async function streamFrom(p, msgs, system, onToken, signal) {
+function supports(p, media) {
+  if (!media.length) return true;
+  const t = (PRESETS[p.vendor] || PRESETS.custom).type;
+  if (t === 'gemini') return true;
+  if (['deepseek', 'perplexity', 'cohere'].includes(p.vendor)) return false;
+  if (t === 'anthropic') return media.every(m => m.mime.startsWith('image/') || m.mime === 'application/pdf');
+  return media.every(m => m.mime.startsWith('image/'));
+}
+async function streamFrom(p, msgs, system, onToken, signal, search) {
   const pre = PRESETS[p.vendor] || PRESETS.custom;
   const base = normalizeBase(p.baseUrl || pre.baseUrl);
   const model = p.defaultModel || pre.model;
@@ -131,19 +139,21 @@ async function streamFrom(p, msgs, system, onToken, signal) {
   let url, body, extract;
   if (pre.type === 'gemini') {
     url = `${base}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(p.key)}`;
-    body = { contents: msgs.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })) };
+    body = { contents: msgs.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [...(m.media || []).map(x => ({ inlineData: { mimeType: x.mime, data: x.b64 } })), { text: m.content }] })) };
+    if (search) body.tools = [{ google_search: {} }];
     if (system) body.systemInstruction = { parts: [{ text: system }] };
     extract = j => (j.candidates?.[0]?.content?.parts || []).map(x => x.text || '').join('');
   } else if (pre.type === 'anthropic') {
     url = `${base}/messages`;
     Object.assign(headers, { 'x-api-key': p.key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' });
-    body = { model, max_tokens: 4096, stream: true, messages: msgs };
+    body = { model, max_tokens: 4096, stream: true, messages: msgs.map(m => m.media?.length ? { role: m.role, content: [...m.media.map(x => ({ type: x.mime === 'application/pdf' ? 'document' : 'image', source: { type: 'base64', media_type: x.mime, data: x.b64 } })), { type: 'text', text: m.content }] } : { role: m.role, content: m.content }) };
     if (system) body.system = system;
     extract = j => (j.type === 'content_block_delta' ? j.delta?.text || '' : '');
   } else {
     if (!base) throw new Error('Base URL is required for custom providers');
     url = `${base}/chat/completions`; headers.Authorization = `Bearer ${p.key}`;
-    body = { model, stream: true, messages: system ? [{ role: 'system', content: system }, ...msgs] : msgs };
+    const om = msgs.map(m => m.media?.length ? { role: m.role, content: [...m.media.map(x => ({ type: 'image_url', image_url: { url: `data:${x.mime};base64,${x.b64}` } })), { type: 'text', text: m.content }] } : { role: m.role, content: m.content });
+    body = { model, stream: true, messages: system ? [{ role: 'system', content: system }, ...om] : om };
     extract = j => j.choices?.[0]?.delta?.content || '';
   }
   const u = new URL(url, location.href);
@@ -171,13 +181,15 @@ async function streamFrom(p, msgs, system, onToken, signal) {
 
 const FIRST_TOKEN_MS = 30000, IDLE_MS = 60000;
 /* unified entry point with automatic fallback */
-async function callAIProvider(prompt, { history = [], system = '', onToken, onFallback, signal } = {}) {
+async function callAIProvider(prompt, { history = [], media = [], search = false, system = '', onToken, onFallback, signal } = {}) {
   const usable = state.profiles.filter(p => p.key);
   const order = [...usable.filter(p => p.id === state.primary), ...usable.filter(p => p.id !== state.primary)];
   if (!order.length) throw new Error('No API key configured');
-  const msgs = [...history, { role: 'user', content: prompt }];
+  const capable = order.filter(p => supports(p, media));
+  if (!capable.length) throw new Error('Video, audio and PDF need a Gemini key. Images also work with OpenAI, Claude, Groq, OpenRouter, Together or Mistral.');
+  const msgs = [...history, { role: 'user', content: prompt, media }];
   let lastErr;
-  for (const p of order) {
+  for (const p of capable) {
     let emitted = false, timedOut = false, timer;
     const ctl = new AbortController();
     const onAbort = () => ctl.abort();
@@ -185,7 +197,7 @@ async function callAIProvider(prompt, { history = [], system = '', onToken, onFa
     const arm = ms => { clearTimeout(timer); timer = setTimeout(() => { timedOut = true; ctl.abort(); }, ms); };
     arm(FIRST_TOKEN_MS);
     try {
-      await streamFrom(p, msgs, system, t => { emitted = true; arm(IDLE_MS); onToken(t); }, ctl.signal);
+      await streamFrom(p, msgs, system, t => { emitted = true; arm(IDLE_MS); onToken(t); }, ctl.signal, search);
       return p;
     } catch (e) {
       if (timedOut) e = new Error(emitted ? `${p.name} stalled for ${IDLE_MS / 1000} s` : `${p.name} gave no answer within ${FIRST_TOKEN_MS / 1000} s`);
@@ -214,25 +226,29 @@ async function send() {
   const input = $('#prompt'), text = input.value.trim();
   if (!text && !state.files.length) return;
   if (!state.profiles.some(p => p.key)) return openVault();
-  const attach = state.files.map(f => `\n\n[File: ${f.name}]\n${f.text}`).join('');
-  const full = text + attach;
-  addMsg('user', text + (state.files.length ? `\n(+${state.files.length} file${state.files.length > 1 ? 's' : ''})` : ''));
+  const textFiles = state.files.filter(f => f.kind === 'text'), media = state.files.filter(f => f.kind === 'media');
+  const full = (text || 'Describe the attached file(s).') + textFiles.map(f => `\n\n[File: ${f.name}]\n${f.text}`).join('');
+  const note = media.length ? `\n[attached: ${media.map(m => m.name).join(', ')}]` : '';
+  const userEl = addMsg('user', text + (textFiles.length ? `\n(+${textFiles.length} text file${textFiles.length > 1 ? 's' : ''})` : ''));
+  media.forEach(m => userEl.appendChild(mediaEl(m)));
   input.value = ''; state.files = []; renderFiles();
+  let system = $('#systemPrompt').value.trim();
+  if ($('#accData').checked && state.data) system += '\n\nLive market data (from data.json):\n' + dataDigest();
   const ai = addMsg('ai', '…'); let out = '', pending = false;
   const t0 = performance.now(); let tFirst = 0;
   state.abort = new AbortController(); setBusy(true);
   const tick = setInterval(() => { if (!out) ai.textContent = `Waiting for a reply… ${Math.round((performance.now() - t0) / 1000)} s`; }, 1000);
   try {
     const p = await callAIProvider(full, {
-      history: state.history, system: $('#systemPrompt').value.trim(), signal: state.abort.signal,
+      history: state.history, media, system, search: $('#accSearch').checked, signal: state.abort.signal,
       onToken: t => { if (!tFirst) tFirst = performance.now() - t0; out += t; if (!pending) { pending = true; raf(() => { ai.innerHTML = md(out); pending = false; scrollDown(); }); } },
       onFallback: (p, e) => sysMsg(`${p.name} failed (${e.message.slice(0, 80)}). Trying next key…`)
     });
     ai.innerHTML = md(out);
-    state.history.push({ role: 'user', content: full }, { role: 'assistant', content: out });
+    state.history.push({ role: 'user', content: full + note }, { role: 'assistant', content: out });
     $('#latency').textContent = `${p.name} · first token ${Math.round(tFirst)} ms · total ${((performance.now() - t0) / 1000).toFixed(1)} s`;
   } catch (e) {
-    if (e.name === 'AbortError') { ai.innerHTML = md(out || 'Stopped.'); if (out) state.history.push({ role: 'user', content: full }, { role: 'assistant', content: out }); }
+    if (e.name === 'AbortError') { ai.innerHTML = md(out || 'Stopped.'); if (out) state.history.push({ role: 'user', content: full + note }, { role: 'assistant', content: out }); }
     else ai.innerHTML = md(`**Error:** ${e.message}`);
   } finally { clearInterval(tick); setBusy(false); updateTokens(); }
 }
@@ -249,12 +265,40 @@ $('#messages').addEventListener('click', e => {
   e.target.textContent = 'Copied'; setTimeout(() => (e.target.textContent = 'Copy'), 1200);
 });
 
-/* ---------- file dropzone ---------- */
-function renderFiles() { $('#fileList').textContent = state.files.map(f => f.name).join(', '); }
+/* ---------- attachments ---------- */
+const TEXT_RE = /\.(txt|md|csv|json|py|js|ts|html|css|xml|ya?ml|log)$/i;
+const MEDIA_LIMIT = 14 * 1024 * 1024;   // inline request limit is ~20 MB after base64
+const toB64 = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(f); });
+function renderFiles() { $('#fileList').innerHTML = state.files.map((f, i) => `<span class="chip">${esc(f.name)} <button type="button" data-rm="${i}" aria-label="Remove ${esc(f.name)}">×</button></span>`).join(''); }
 async function addFiles(list) {
-  for (const f of list) { if (f.size > 500000) { sysMsg(`${f.name} is over 500 KB and was skipped.`); continue; } state.files.push({ name: f.name, text: await f.text() }); }
+  for (const f of list) {
+    if (/^(image|video|audio)\//.test(f.type) || f.type === 'application/pdf') {
+      const used = state.files.filter(x => x.kind === 'media').reduce((n, x) => n + x.size, 0);
+      if (used + f.size > MEDIA_LIMIT) { sysMsg(`${f.name} skipped: attachments are limited to 14 MB in total.`); continue; }
+      state.files.push({ kind: 'media', name: f.name || 'pasted-file', mime: f.type, size: f.size, b64: await toB64(f), url: URL.createObjectURL(f) });
+    } else if (f.type.startsWith('text/') || TEXT_RE.test(f.name)) {
+      if (f.size > 500000) { sysMsg(`${f.name} is over 500 KB and was skipped.`); continue; }
+      state.files.push({ kind: 'text', name: f.name, size: f.size, text: await f.text() });
+    } else sysMsg(`${f.name}: unsupported file type.`);
+  }
   renderFiles();
 }
+function mediaEl(m) {
+  const tag = m.mime.startsWith('image/') ? 'img' : m.mime.startsWith('video/') ? 'video' : m.mime.startsWith('audio/') ? 'audio' : 'a';
+  const el = document.createElement(tag);
+  if (tag === 'a') Object.assign(el, { textContent: m.name, href: m.url, target: '_blank' });
+  else { el.src = m.url; if (tag !== 'img') el.controls = true; else el.alt = m.name; el.addEventListener('load', scrollDown); }
+  return el;
+}
+$('#fileList').addEventListener('click', e => { const i = e.target.dataset.rm; if (i === undefined) return; state.files.splice(+i, 1); renderFiles(); });
+$('#prompt').addEventListener('paste', e => { const fs = [...(e.clipboardData?.files || [])]; if (fs.length) { e.preventDefault(); addFiles(fs); } });
+
+/* ---------- access toggles ---------- */
+const acc = load('aicc.access', { data: false, search: false });
+$('#accData').checked = !!acc.data; $('#accSearch').checked = !!acc.search;
+$('#accessWrap').addEventListener('change', () => save('aicc.access', { data: $('#accData').checked, search: $('#accSearch').checked }));
+const dataDigest = () => JSON.stringify((state.data.markets || []).map(m => ({ name: m.name, symbol: m.symbol, price: m.price, change_pct: m.change_pct, last7: m.history.slice(-7).map(h => h.c) })));
+
 const dz = $('#dropzone');
 ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('over'); }));
 ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('over'); }));
