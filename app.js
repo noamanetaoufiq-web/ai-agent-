@@ -6,7 +6,7 @@ const LS = { profiles: 'aicc.profiles', primary: 'aicc.primary', system: 'aicc.s
 const PRESETS = {
   openai:     { label: 'OpenAI',      type: 'openai',    baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' },
   anthropic:  { label: 'Claude',      type: 'anthropic', baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-5' },
-  gemini:     { label: 'Gemini',      type: 'gemini',    baseUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.0-flash' },
+  gemini:     { label: 'Gemini',      type: 'gemini',    baseUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-flash-latest' },
   deepseek:   { label: 'DeepSeek',    type: 'openai',    baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
   groq:       { label: 'Groq',        type: 'openai',    baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
   openrouter: { label: 'OpenRouter',  type: 'openai',    baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
@@ -153,7 +153,7 @@ async function streamFrom(p, msgs, system, onToken, signal) {
   if (!r.ok) {
     const t = await r.text().catch(() => ''); let msg = t;
     try { const j = JSON.parse(t); msg = j.error?.message || j.error || j.message || t; } catch { /* not JSON */ }
-    msg = String(typeof msg === 'string' ? msg : JSON.stringify(msg)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    msg = String(typeof msg === 'string' ? msg : JSON.stringify(msg)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
     const e = new Error(`${r.status} from ${u.host}${u.pathname}: ${msg || 'empty response'}`); e.status = r.status; throw e;
   }
   const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
@@ -287,6 +287,8 @@ function drawChart() {
 /* ---------- init ---------- */
 window.addEventListener('load', () => {
   state.profiles = load(LS.profiles, []); state.primary = load(LS.primary, null);
+  state.profiles.forEach(p => { if (p.vendor === 'gemini' && /^gemini-2\.0-flash(-lite)?(-001)?$/.test(p.defaultModel)) p.defaultModel = 'gemini-flash-latest'; });   // 2.0 models are retired
+  save(LS.profiles, state.profiles);
   renderModelSelect(); updateStatus(); loadData();
   if (!state.profiles.some(p => p.key)) { if (!state.profiles.length) state.profiles.push({ id: uid(), vendor: 'deepseek', name: 'DeepSeek', key: '', baseUrl: '', defaultModel: 'deepseek-chat' }); state.primary = state.primary || state.profiles[0].id; openVault(); }
 });
