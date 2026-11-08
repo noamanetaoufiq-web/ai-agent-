@@ -23,7 +23,11 @@
     <details id="sysWrap"><summary>System prompt</summary>
       <textarea id="systemPrompt" rows="3" placeholder="You are a precise trading and research assistant…"></textarea>
     </details>
-    <div id="dropzone">Drop text files here or <label class="link">browse<input id="fileInput" type="file" multiple hidden></label> <span id="fileList"></span></div>
+    <div id="dropzone">Drop or paste images, videos, audio, PDF or text files, or <label class="link">browse<input id="fileInput" type="file" multiple accept="image/*,video/*,audio/*,application/pdf,text/*,.md,.csv,.json,.py,.js,.ts,.html,.css,.xml,.yml,.yaml,.log" hidden></label><span id="fileList"></span></div>
+    <details id="accessWrap"><summary>Access</summary>
+      <label class="opt"><input type="checkbox" id="accData"> Let the agent read the market data (data.json)</label>
+      <label class="opt"><input type="checkbox" id="accSearch"> Let the agent search Google (Gemini keys only)</label>
+    </details>
     <div class="composer">
       <textarea id="prompt" rows="2" placeholder="Ask anything. Enter to send, Shift+Enter for a new line."></textarea>
       <button id="sendBtn" class="btn primary">Send</button>
