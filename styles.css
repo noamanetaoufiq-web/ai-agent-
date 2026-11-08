@@ -55,3 +55,9 @@ h2{font-size:15px}
 .primary-opt{display:flex;gap:4px;align-items:center;white-space:nowrap}
 @media(max-width:900px){body{height:auto}#app{grid-template-columns:1fr}#messages{min-height:50vh}.vault-row{grid-template-columns:1fr 1fr;padding-bottom:10px;border-bottom:1px solid var(--line)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+.chip{display:inline-flex;gap:4px;align-items:center;background:#1d1d23;border-radius:99px;padding:0 4px 0 10px;margin-left:6px;color:var(--text)}
+.chip button{background:none;border:0;color:var(--amber);cursor:pointer;font-size:14px}
+.msg img,.msg video{display:block;max-width:100%;max-height:220px;border-radius:8px;margin-top:6px}
+.msg audio{display:block;margin-top:6px;max-width:100%}
+.opt{display:flex;gap:8px;align-items:center;margin-top:6px;color:var(--text);font-size:13px}
