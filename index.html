@@ -4,18 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI Control Center</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=4">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
-<script src="app.js" defer></script>
+<script src="app.js?v=4" defer></script>
 </head>
 <body>
-<header id="topbar" class="glass">
-  <button id="toggleSide" class="btn sm side-toggle" type="button" aria-label="Chats">☰</button>
+<div id="ticker" aria-label="Market ticker"><div id="tickerTrack"><span class="tk-empty">Loading markets…</span></div></div>
+
+<header id="topbar">
+  <button id="toggleSide" class="btn icon" type="button" aria-label="Show or hide chats">☰</button>
   <div class="logo"><span class="dot"></span><strong>AI Control Center</strong></div>
   <span id="statusBadge" class="badge">Checking…</span>
   <div class="spacer"></div>
-  <label class="sel">Active model <select id="modelSelect"></select></label>
-  <button id="openVault" class="btn" aria-label="Open API Vault">⚙ API Vault</button>
+  <label class="sel"><span>Model</span><select id="modelSelect"></select></label>
+  <button id="openVault" class="btn" type="button">⚙ API Vault</button>
 </header>
 
 <main id="app">
@@ -23,28 +25,31 @@
     <button id="newChat" class="btn primary" type="button">+ New chat</button>
     <div id="chatList"></div>
   </aside>
+
   <section id="chatPanel" class="glass">
     <div id="messages" aria-live="polite"></div>
-    <details id="sysWrap"><summary>System prompt</summary>
-      <textarea id="systemPrompt" rows="3" placeholder="You are a precise trading and research assistant…"></textarea>
-    </details>
     <div id="fileList"></div>
-    <details id="accessWrap"><summary>Access</summary>
-      <label class="opt"><input type="checkbox" id="accData"> Let the agent read the market data (data.json)</label>
-      <label class="opt"><input type="checkbox" id="accSearch"> Let the agent search Google (Gemini keys only)</label>
-    </details>
+    <div class="opts">
+      <details id="sysWrap"><summary>System prompt</summary>
+        <textarea id="systemPrompt" rows="3" placeholder="You are a precise trading and research assistant…"></textarea>
+      </details>
+      <details id="accessWrap"><summary>Access</summary>
+        <label class="opt"><input type="checkbox" id="accData"> Let the agent read the market data (data.json)</label>
+        <label class="opt"><input type="checkbox" id="accSearch"> Let the agent search Google (Gemini keys only)</label>
+      </details>
+    </div>
     <div class="composer">
       <button id="attachBtn" class="btn icon" type="button" aria-label="Attach files" title="Attach image, video, PDF or any file">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>
       </button>
       <input id="fileInput" type="file" multiple hidden>
-      <textarea id="prompt" rows="2" placeholder="Ask anything. Attach, drop or paste files. Enter to send."></textarea>
-      <button id="sendBtn" class="btn primary">Send</button>
-      <button id="stopBtn" class="btn" hidden>Stop</button>
+      <textarea id="prompt" rows="1" placeholder="Ask anything. Attach, drop or paste files. Enter to send."></textarea>
+      <button id="sendBtn" class="btn primary" type="button">Send</button>
+      <button id="stopBtn" class="btn" type="button" hidden>Stop</button>
     </div>
     <div class="toolbar">
-      <button id="clearBtn" class="btn sm">Clear</button>
-      <button id="copyBtn" class="btn sm">Copy chat</button>
+      <button id="clearBtn" class="btn sm" type="button">Clear</button>
+      <button id="copyBtn" class="btn sm" type="button">Copy chat</button>
       <span class="spacer"></span>
       <span id="tokenCount">0 tokens</span>
       <span id="latency">–</span>
@@ -61,16 +66,16 @@
 
 <div id="vaultModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="vaultTitle">
   <div class="modal-card glass">
-    <div class="row-head"><h2 id="vaultTitle">API Vault</h2><button id="closeVault" class="btn sm">Close</button></div>
+    <div class="row-head"><h2 id="vaultTitle">API Vault</h2><button id="closeVault" class="btn sm" type="button">Close</button></div>
     <p class="mut">Keys stay in this browser (localStorage). Requests go straight from your browser to each provider.</p>
     <div id="vaultList"></div>
     <div class="toolbar">
-      <button id="addKey" class="btn">+ Add key</button>
+      <button id="addKey" class="btn" type="button">+ Add key</button>
       <span class="spacer"></span>
-      <button id="importCfg" class="btn">Import config</button>
+      <button id="importCfg" class="btn" type="button">Import config</button>
       <input id="importFile" type="file" accept="application/json" hidden>
-      <button id="exportCfg" class="btn">Export config (JSON)</button>
-      <button id="saveVault" class="btn primary">Save credentials</button>
+      <button id="exportCfg" class="btn" type="button">Export config (JSON)</button>
+      <button id="saveVault" class="btn primary" type="button">Save credentials</button>
     </div>
   </div>
 </div>
