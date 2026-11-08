@@ -1,4 +1,4 @@
-:root{--v:4;--bg:#09090b;--panel:rgba(20,20,24,.72);--line:rgba(255,255,255,.08);--amber:#f59e0b;--amber-d:#d97706;--text:#ececf1;--mut:#8b8b95;--r:18px}
+:root{--v:5;--bg:#09090b;--panel:rgba(20,20,24,.72);--line:rgba(255,255,255,.08);--amber:#f59e0b;--amber-d:#d97706;--text:#ececf1;--mut:#8b8b95;--r:18px}
 *{box-sizing:border-box;margin:0}
 html,body{height:100%}
 body{background:radial-gradient(900px 500px at 90% -10%,rgba(245,158,11,.10),transparent 60%),radial-gradient(700px 400px at -10% 110%,rgba(217,119,6,.07),transparent 60%),var(--bg);color:var(--text);font:14px/1.55 Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;gap:10px;padding:0 12px 12px;height:100dvh;overflow:hidden}
@@ -126,3 +126,10 @@ h2{font-size:15px}
   #app.side-off #histPanel{display:none}
 }
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* v5 additions */
+.chartmsg{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:12px;font-size:13px}
+.chartmsg[hidden]{display:none}
+.linkbtn{background:none;border:0;color:var(--amber);cursor:pointer;text-decoration:underline;font:inherit;padding:0}
+.vstat{flex:1 1 100%;font-size:12px;color:var(--mut);min-height:0}.vstat:empty{display:none}
+.vstat .pick{background:rgba(245,158,11,.15);color:var(--amber);border:1px solid rgba(245,158,11,.4);border-radius:8px;cursor:pointer;padding:2px 8px;font:inherit}

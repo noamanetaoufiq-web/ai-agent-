@@ -9,13 +9,26 @@ const PRESETS = {
   gemini:     { label: 'Gemini',      type: 'gemini',    baseUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-flash-latest' },
   deepseek:   { label: 'DeepSeek',    type: 'openai',    baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
   groq:       { label: 'Groq',        type: 'openai',    baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
-  openrouter: { label: 'OpenRouter',  type: 'openai',    baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
+  openrouter: { label: 'OpenRouter',  type: 'openai',    baseUrl: 'https://openrouter.ai/api/v1', model: 'openrouter/free' },
   together:   { label: 'Together AI', type: 'openai',    baseUrl: 'https://api.together.xyz/v1', model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
-  mistral:    { label: 'Mistral',     type: 'openai',    baseUrl: 'https://api.mistral.ai/v1', model: 'mistral-large-latest' },
+  mistral:    { label: 'Mistral',     type: 'openai',    baseUrl: 'https://api.mistral.ai/v1', model: 'mistral-small-latest' },
   perplexity: { label: 'Perplexity',  type: 'openai',    baseUrl: 'https://api.perplexity.ai', model: 'sonar' },
   cohere:     { label: 'Cohere',      type: 'openai',    baseUrl: 'https://api.cohere.ai/compatibility/v1', model: 'command-r-plus' },
   custom:     { label: 'Custom (OpenAI-compatible)', type: 'openai', baseUrl: '', model: '' }
 };
+
+const TAGS = { gemini: 'free tier', groq: 'free tier', openrouter: 'free models', mistral: 'free tier', cohere: 'trial key', deepseek: 'paid', openai: 'paid', anthropic: 'paid', perplexity: 'paid', together: 'paid' };
+/* starting suggestions only: names change often, so "Check key" in the vault lists what your key really supports */
+const MODELS = {
+  gemini: ['gemini-flash-latest', 'gemini-flash-lite-latest'],
+  groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'openai/gpt-oss-120b', 'qwen/qwen3-32b', 'meta-llama/llama-4-scout-17b-16e-instruct'],
+  openrouter: ['openrouter/free', 'meta-llama/llama-3.3-70b-instruct:free'],
+  mistral: ['mistral-small-latest', 'open-mistral-nemo', 'mistral-large-latest'],
+  cohere: ['command-r', 'command-r-plus'], deepseek: ['deepseek-chat', 'deepseek-reasoner'],
+  openai: ['gpt-4o', 'gpt-4o-mini'], anthropic: ['claude-sonnet-4-5', 'claude-haiku-4-5'],
+  perplexity: ['sonar', 'sonar-pro'], together: ['meta-llama/Llama-3.3-70B-Instruct-Turbo']
+};
+const modelOpts = v => (MODELS[v] || []).map(m => `<option value="${esc(m)}">`).join('');
 
 const state = { chats: [], chatId: null, view: [], profiles: [], primary: null, history: [], files: [], busy: false, abort: null, chart: null, data: null, symbol: null };
 
@@ -28,31 +41,35 @@ const raf = fn => requestAnimationFrame(fn);
 
 /* ---------- markdown (minimal, safe) ---------- */
 function md(src) {
-  return src.split('```').map((s, i) => {
+  return String(src ?? '').split('```').map((s, i) => {
     if (i % 2) {
       const nl = s.indexOf('\n');
       const code = nl > -1 ? s.slice(nl + 1) : s;
       return `<div class="code"><button type="button" data-act="copy-code">Copy</button><pre><code>${esc(code)}</code></pre></div>`;
     }
-    return esc(s)
-      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    const codes = [];   // inline code is lifted out as RAW text, escaped once when put back
+    const t = s.replace(/\u0000/g, '').replace(/`([^`\n]+)`/g, (_, c) => '\u0000' + (codes.push(c) - 1) + '\u0000');
+    return esc(t)
       .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
       .replace(/^#{1,3} (.+)$/gm, '<strong>$1</strong>')
-      .replace(/\n/g, '<br>');
+      .replace(/\n/g, '<br>')
+      .replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${esc(codes[n])}</code>`);
   }).join('');
 }
 
 /* ---------- vault ---------- */
 function rowHTML(p) {
-  const opts = Object.entries(PRESETS).map(([k, v]) => `<option value="${k}" ${k === p.vendor ? 'selected' : ''}>${v.label}</option>`).join('');
+  const opts = Object.entries(PRESETS).map(([k, v]) => `<option value="${k}" ${k === p.vendor ? 'selected' : ''}>${v.label}${TAGS[k] ? ' · ' + TAGS[k] : ''}</option>`).join('');
   return `<div class="vault-row" data-id="${p.id}">
     <select data-f="vendor" aria-label="Vendor">${opts}</select>
     <input data-f="name" placeholder="Label" value="${esc(p.name)}" aria-label="Label">
-    <input data-f="defaultModel" placeholder="Model ID" value="${esc(p.defaultModel)}" aria-label="Model ID">
+    <input data-f="defaultModel" list="dl-${p.id}" placeholder="Model ID" value="${esc(p.defaultModel)}" aria-label="Model ID" autocomplete="off"><datalist id="dl-${p.id}">${modelOpts(p.vendor)}</datalist>
     <div class="keywrap"><input data-f="key" type="password" placeholder="API key" value="${esc(p.key)}" autocomplete="off" aria-label="API key"><button type="button" data-act="eye">Show</button></div>
     <input data-f="baseUrl" placeholder="Base URL (optional)" value="${esc(p.baseUrl)}" aria-label="Base URL">
     <label class="primary-opt"><input type="radio" name="primary" value="${p.id}" ${p.id === state.primary ? 'checked' : ''}> Primary</label>
+    <button type="button" data-act="test">Check key</button>
     <button type="button" data-act="del">Delete</button>
+    <div class="vstat" role="status"></div>
   </div>`;
 }
 function renderVault() { $('#vaultList').innerHTML = state.profiles.map(rowHTML).join(''); }
@@ -73,6 +90,8 @@ $('#vaultModal').addEventListener('click', e => {
   if (e.target.id === 'vaultModal') return closeVault();
   const row = e.target.closest('.vault-row'); const act = e.target.dataset.act;
   if (act === 'eye') { const i = row.querySelector('[data-f="key"]'); const show = i.type === 'password'; i.type = show ? 'text' : 'password'; e.target.textContent = show ? 'Hide' : 'Show'; }
+  if (act === 'test') return testKey(row);
+  if (act === 'pick') { row.querySelector('[data-f="defaultModel"]').value = e.target.dataset.model; row.querySelector('.vstat').textContent = 'Model set. Press "Save credentials".'; return; }
   if (act === 'del') { readVault(); state.profiles = state.profiles.filter(p => p.id !== row.dataset.id); if (state.primary === row.dataset.id) state.primary = (state.profiles[0] || {}).id || null; renderVault(); }
 });
 $('#vaultModal').addEventListener('change', e => {
@@ -81,6 +100,7 @@ $('#vaultModal').addEventListener('change', e => {
   row.querySelector('[data-f="defaultModel"]').value = pre.model;
   row.querySelector('[data-f="baseUrl"]').value = '';
   row.querySelector('[data-f="name"]').value = pre.label;
+  row.querySelector('datalist').innerHTML = modelOpts(e.target.value); row.querySelector('.vstat').textContent = '';
 });
 $('#addKey').onclick = () => { readVault(); const pre = PRESETS.openai; state.profiles.push({ id: uid(), vendor: 'openai', name: pre.label, key: '', baseUrl: '', defaultModel: pre.model }); if (!state.primary) state.primary = state.profiles[0].id; renderVault(); };
 $('#saveVault').onclick = () => { readVault(); persist(); closeVault(); sysMsg('Credentials saved.'); };
@@ -102,6 +122,47 @@ $('#importFile').onchange = async e => {
   } catch { sysMsg('Import failed: not a valid config file.'); }
   e.target.value = '';
 };
+
+async function httpError(r, u) {
+  const t = await r.text().catch(() => ''); let msg = t;
+  try { const j = JSON.parse(t); msg = j.error?.message || j.error || j.message || t; } catch { /* not JSON */ }
+  msg = String(typeof msg === 'string' ? msg : JSON.stringify(msg)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const hint = r.status === 429 ? ' (free-tier rate limit: wait a minute or add another key)'
+    : r.status === 401 || r.status === 403 ? ' (check the API key)'
+    : r.status === 404 || (r.status === 400 && /model/i.test(msg)) ? ' (wrong model? API Vault > Check key lists the valid ones)' : '';
+  const e = new Error(`${r.status} from ${u.host}${u.pathname}: ${msg || 'empty response'}${hint}`); e.status = r.status; return e;
+}
+async function listModels(p) {
+  const pre = PRESETS[p.vendor] || PRESETS.custom, base = normalizeBase(p.baseUrl || pre.baseUrl), headers = {};
+  if (!base) throw new Error('Base URL is required');
+  let url;
+  if (pre.type === 'gemini') url = `${base}/models?pageSize=200&key=${encodeURIComponent(p.key)}`;
+  else if (pre.type === 'anthropic') { url = `${base}/models?limit=100`; Object.assign(headers, { 'x-api-key': p.key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }); }
+  else { url = `${base}/models`; headers.Authorization = `Bearer ${p.key}`; }
+  const u = new URL(url); let r;
+  try { r = await fetch(url, { headers }); } catch { throw new Error(`cannot reach ${u.host} (network, CORS, adblock or VPN)`); }
+  if (!r.ok) throw await httpError(r, u);
+  const j = await r.json();
+  let ids = pre.type === 'gemini'
+    ? (j.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent')).map(m => String(m.name).replace(/^models\//, ''))
+    : (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean);
+  ids = [...new Set(ids)].sort();
+  return p.vendor === 'openrouter' ? ids.sort((a, b) => (b.endsWith(':free') - a.endsWith(':free')) || a.localeCompare(b)) : ids;
+}
+const bestPick = (v, ids) => (MODELS[v] || []).find(m => ids.includes(m)) || ids.find(m => /flash.*latest/.test(m)) || ids.find(m => /free/.test(m)) || ids[0];
+async function testKey(row) {
+  const g = f => row.querySelector(`[data-f="${f}"]`), st = row.querySelector('.vstat');
+  const p = { vendor: g('vendor').value, key: g('key').value.trim(), baseUrl: g('baseUrl').value.trim(), defaultModel: g('defaultModel').value.trim() };
+  if (!p.key) { st.textContent = 'Paste the API key first.'; return; }
+  st.textContent = 'Checking…';
+  try {
+    const ids = await listModels(p);
+    row.querySelector('datalist').innerHTML = ids.map(m => `<option value="${esc(m)}">`).join('');
+    if (!ids.length) st.textContent = 'Key accepted, but the provider returned no model list.';
+    else if (ids.includes(p.defaultModel)) st.textContent = `✓ Key works · ${ids.length} models · "${p.defaultModel}" is available.`;
+    else { const b = bestPick(p.vendor, ids); st.innerHTML = `✓ Key works · ${ids.length} models · but "${esc(p.defaultModel)}" is not available for it. Use: <button type="button" class="pick" data-act="pick" data-model="${esc(b)}">${esc(b)}</button>`; }
+  } catch (e) { st.textContent = (e.status === 404 ? 'This provider has no model list; pick one from the suggestions. ' : '✗ ') + e.message; }
+}
 
 function renderModelSelect() {
   const sel = $('#modelSelect');
@@ -160,12 +221,7 @@ async function streamFrom(p, msgs, system, onToken, signal, search) {
   let r;
   try { r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal }); }
   catch (e) { if (e.name === 'AbortError') throw e; throw new Error(`cannot reach ${u.host} (network, CORS, adblock or VPN)`); }
-  if (!r.ok) {
-    const t = await r.text().catch(() => ''); let msg = t;
-    try { const j = JSON.parse(t); msg = j.error?.message || j.error || j.message || t; } catch { /* not JSON */ }
-    msg = String(typeof msg === 'string' ? msg : JSON.stringify(msg)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
-    const e = new Error(`${r.status} from ${u.host}${u.pathname}: ${msg || 'empty response'}`); e.status = r.status; throw e;
-  }
+  if (!r.ok) throw await httpError(r, u);
   const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
   for (;;) {
     const { done, value } = await reader.read(); if (done) break;
@@ -235,6 +291,7 @@ async function send() {
   state.view.push({ role: 'user', text: shown + note });
   media.forEach(m => userEl.appendChild(mediaEl(m)));
   input.value = ''; input.style.height = 'auto'; state.files = []; renderFiles();
+  const aiView = { role: 'ai', text: '' }; state.view.push(aiView); saveCurrent();   // the question is on disk before the request starts
   let system = $('#systemPrompt').value.trim();
   if ($('#accData').checked && state.data) system += '\n\nLive market data (from data.json):\n' + dataDigest();
   const ai = addMsg('ai', '…'); let out = '', pending = false, finalText = '';
@@ -244,7 +301,7 @@ async function send() {
   try {
     const p = await callAIProvider(full, {
       history: state.history, media, system, search: $('#accSearch').checked, signal: state.abort.signal,
-      onToken: t => { if (!tFirst) tFirst = performance.now() - t0; out += t; if (!pending) { pending = true; raf(() => { ai.innerHTML = md(out); pending = false; scrollDown(); }); } },
+      onToken: t => { if (!tFirst) tFirst = performance.now() - t0; out += t; aiView.text = out; saveSoon(); if (!pending) { pending = true; raf(() => { ai.innerHTML = md(out); pending = false; scrollDown(); }); } },
       onFallback: (p, e) => sysMsg(`${p.name} failed (${e.message.slice(0, 80)}). Trying next key…`)
     });
     ai.innerHTML = md(out); finalText = out;
@@ -253,7 +310,7 @@ async function send() {
   } catch (e) {
     if (e.name === 'AbortError') { finalText = out || 'Stopped.'; ai.innerHTML = md(finalText); if (out) state.history.push({ role: 'user', content: full + note }, { role: 'assistant', content: out }); }
     else { finalText = `**Error:** ${e.message}`; ai.innerHTML = md(finalText); }
-  } finally { clearInterval(tick); setBusy(false); updateTokens(); state.view.push({ role: 'ai', text: finalText }); saveCurrent(); }
+  } finally { clearInterval(tick); setBusy(false); updateTokens(); aiView.text = finalText; clearTimeout(saveTimer); saveTimer = 0; saveCurrent(); }
 }
 $('#sendBtn').onclick = send;
 $('#prompt').addEventListener('input', e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; });
@@ -311,21 +368,34 @@ $('#fileInput').onchange = e => { addFiles([...e.target.files]); e.target.value 
 $('#attachBtn').onclick = () => $('#fileInput').click();
 
 /* ---------- data.json ---------- */
+const num = v => { v = typeof v === 'string' ? parseFloat(v) : v; return Number.isFinite(v) ? v : null; };
+function normalize(d) {
+  if (!d || typeof d !== 'object' || !Array.isArray(d.markets)) throw new Error('data.json has no "markets" array');
+  d.markets = d.markets.filter(m => m && m.symbol).map(m => {
+    const h = (Array.isArray(m.history) ? m.history : []).map(x => typeof x === 'number' ? { d: '', c: x } : { d: String(x?.d ?? x?.date ?? ''), c: num(x?.c ?? x?.close) }).filter(x => x.c !== null);
+    return { ...m, name: m.name || m.symbol, price: num(m.price) ?? (h.length ? h[h.length - 1].c : null), change_pct: num(m.change_pct) ?? 0, history: h };
+  });
+  return d;
+}
 async function loadData() {
+  const box = $('#metrics'), tk = $('#tickerTrack');
+  const fail = why => {
+    box.innerHTML = `<p class="mut">No market data (${esc(why)}). Run the "Update data" GitHub Action once, then <button type="button" class="linkbtn" data-act="retry-data">retry</button>.</p>`;
+    tk.classList.remove('live'); tk.innerHTML = '<span class="tk-empty">Market data unavailable</span>';
+  };
   try {
-    const r = await fetch('./data.json?t=' + Date.now()); if (!r.ok) throw new Error(r.status);
-    state.data = await r.json();
-  } catch (e) {
-    $('#metrics').innerHTML = `<p class="mut">No market data (${esc(e.message)}). Run the "Update data" GitHub Action once.</p>`;
-    $('#tickerTrack').innerHTML = '<span class="tk-empty">Market data unavailable</span>';
-    return;
-  }
+    if (location.protocol === 'file:') throw new Error('page opened from file://, use GitHub Pages or a local web server');
+    let r; try { r = await fetch('./data.json?t=' + Date.now(), { cache: 'no-store' }); } catch { throw new Error('network error while loading data.json'); }
+    if (!r.ok) throw new Error(`HTTP ${r.status}${r.status === 404 ? ', data.json not found' : ''}`);
+    let j; try { j = await r.json(); } catch { throw new Error('data.json is not valid JSON'); }
+    state.data = normalize(j);
+  } catch (e) { state.data = null; return fail(e.message); }
   const d = state.data;
-  if (!Array.isArray(d.markets) || !d.markets.length) { $('#metrics').innerHTML = '<p class="mut">data.json has no markets yet.</p>'; return; }
   $('#updatedAt').textContent = d.updated ? 'Updated ' + new Date(d.updated).toLocaleString() : '';
-  $('#jsonView').textContent = JSON.stringify(d, null, 1).slice(0, 4000);
-  state.symbol = state.symbol || d.markets?.[0]?.symbol;
-  renderMetrics(); renderTicker(); drawChart();
+  if (!d.markets.length) { box.innerHTML = '<p class="mut">data.json has no markets yet. Run the "Update data" GitHub Action.</p>'; tk.classList.remove('live'); tk.innerHTML = '<span class="tk-empty">No market data yet</span>'; return; }
+  try { $('#jsonView').textContent = JSON.stringify(d, null, 1).slice(0, 4000); } catch (e) { console.error(e); }
+  if (!d.markets.some(m => m.symbol === state.symbol)) state.symbol = d.markets[0].symbol;
+  [renderMetrics, renderTicker, drawChart].forEach(fn => { try { fn(); } catch (e) { console.error(fn.name, e); } });
 }
 function renderTicker() {
   const ms = state.data.markets, track = $('#tickerTrack');
@@ -340,38 +410,73 @@ function renderMetrics() {
     return `<button class="metric ${m.symbol === state.symbol ? 'active' : ''}" data-sym="${esc(m.symbol)}"><span class="mut">${esc(m.name)}</span><b>${m.price ?? '–'}</b><span class="${up ? 'up' : 'down'}">${up ? '+' : ''}${m.change_pct ?? 0}%</span></button>`;
   }).join('');
 }
-$('#metrics').addEventListener('click', e => { const b = e.target.closest('.metric'); if (!b) return; state.symbol = b.dataset.sym; renderMetrics(); drawChart(); });
+$('#metrics').addEventListener('click', e => { if (e.target.dataset.act === 'retry-data') return loadData(); const b = e.target.closest('.metric'); if (!b) return; state.symbol = b.dataset.sym; renderMetrics(); drawChart(); });
 function drawChart() {
-  const m = (state.data.markets || []).find(x => x.symbol === state.symbol);
-  if (!m || typeof Chart === 'undefined') return;
-  const cfg = { labels: m.history.map(h => h.d), data: m.history.map(h => h.c) };
-  if (state.chart) state.chart.destroy();
-  state.chart = new Chart($('#mainChart'), {
+  const msg = $('#chartMsg'), cv = $('#mainChart');
+  const m = (state.data?.markets || []).find(x => x.symbol === state.symbol);
+  if (state.chart) { state.chart.destroy(); state.chart = null; }
+  const show = t => { msg.textContent = t; msg.hidden = !t; cv.style.visibility = t ? 'hidden' : 'visible'; };
+  if (!m) return show('Select a market.');
+  if (m.history.length < 2) return show(`No history for ${m.name} yet. Run the "Update data" GitHub Action again.`);
+  if (typeof Chart === 'undefined') return show(`Chart.js did not load (adblock or offline). Last close: ${m.history[m.history.length - 1].c}`);
+  show('');
+  state.chart = new Chart(cv, {
     type: 'line',
-    data: { labels: cfg.labels, datasets: [{ label: m.name, data: cfg.data, borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.12)', fill: true, tension: .25, pointRadius: 0, borderWidth: 2 }] },
+    data: { labels: m.history.map(h => h.d), datasets: [{ label: m.name, data: m.history.map(h => h.c), borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.12)', fill: true, tension: .25, pointRadius: 0, borderWidth: 2 }] },
     options: { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8b95', maxTicksLimit: 6 }, grid: { display: false } }, y: { ticks: { color: '#8b8b95' }, grid: { color: 'rgba(255,255,255,.05)' } } } }
   });
 }
 
 /* ---------- chat history ---------- */
-const CH = 'aicc.chats';
-function saveChats() { try { localStorage.setItem(CH, JSON.stringify(state.chats)); } catch { sysMsg('History not saved: browser storage is full. Delete old chats.'); } }
+const CH = 'aicc.chats', MAXMSG = 30000;
+let corruptNote = false, fullWarned = false, saveTimer = 0;
+const saveSoon = () => { if (!saveTimer) saveTimer = setTimeout(() => { saveTimer = 0; saveCurrent(); }, 1500); };
+function readChats() {
+  let raw = null;
+  try { raw = localStorage.getItem(CH); } catch { return []; }
+  if (!raw) return [];
+  try {
+    const a = JSON.parse(raw); if (!Array.isArray(a)) throw new Error('not an array');
+    return a.filter(c => c && c.id).map(c => ({ id: String(c.id), title: String(c.title || 'New chat'), updated: +c.updated || 0, history: Array.isArray(c.history) ? c.history : [], view: Array.isArray(c.view) ? c.view : [] }));
+  } catch {
+    try { localStorage.setItem(CH + '.bak', raw); } catch { /* ignore */ }   // never overwrite unreadable data without a copy
+    corruptNote = true; return [];
+  }
+}
+const clip = s => (typeof s === 'string' && s.length > MAXMSG ? s.slice(0, MAXMSG) + '\n…[truncated to save space]' : s);
+const slim = c => ({ ...c, history: c.history.map(m => ({ ...m, content: clip(m.content) })), view: c.view.map(m => ({ ...m, text: clip(m.text) })) });
+function writeChats(list) {
+  const l = list.map(slim); let dropped = 0;
+  for (;;) {
+    try {
+      localStorage.setItem(CH, JSON.stringify(l)); fullWarned = false;
+      if (dropped) { const keep = new Set(l.map(c => c.id)); state.chats = state.chats.filter(c => keep.has(c.id)); sysMsg(`Storage full: the ${dropped} oldest chat(s) were removed so new ones can be saved.`); }
+      return true;
+    } catch {
+      let i = l.length - 1; while (i >= 0 && l[i].id === state.chatId) i--;   // drop the oldest chat that is not open
+      if (i < 0) { if (!fullWarned) { fullWarned = true; sysMsg('Chat not saved: browser storage is full. Delete old chats.'); } return false; }
+      l.splice(i, 1); dropped++;
+    }
+  }
+}
 function ensureChat(title) {
   if (state.chatId) return;
   const c = { id: uid(), title: title.slice(0, 40), updated: Date.now(), history: state.history, view: state.view };
   state.chats.unshift(c); state.chatId = c.id; renderChatList();
 }
 function saveCurrent() {
-  const c = state.chats.find(x => x.id === state.chatId); if (!c) return;
-  c.history = state.history; c.view = state.view; c.updated = Date.now();
-  state.chats.sort((a, b) => b.updated - a.updated); saveChats(); renderChatList();
+  const cur = state.chats.find(x => x.id === state.chatId); if (!cur) return;
+  cur.history = state.history; cur.view = state.view; cur.updated = Date.now();
+  const others = readChats().filter(c => c.id !== cur.id);   // keep chats saved meanwhile by another tab
+  state.chats = [cur, ...others].sort((a, b) => b.updated - a.updated);
+  writeChats(state.chats); renderChatList();
 }
 function renderChatList() {
   $('#chatList').innerHTML = state.chats.map(c => `<div class="chat-item ${c.id === state.chatId ? 'active' : ''}" data-id="${c.id}"><button type="button" class="chat-open" data-act="open" title="${esc(c.title)}">${esc(c.title || 'New chat')}</button><button type="button" class="chat-del" data-act="del" aria-label="Delete chat">×</button></div>`).join('') || '<p class="mut">No chats yet.</p>';
 }
 function showChat(c) {
   state.chatId = c ? c.id : null; state.history = c ? c.history : []; state.view = c ? c.view : [];
-  $('#messages').innerHTML = ''; state.view.forEach(m => addMsg(m.role, m.text));
+  $('#messages').innerHTML = ''; state.view.forEach(m => addMsg(m.role, m.text || '(no reply was saved: the page was closed while waiting)'));
   updateTokens(); $('#latency').textContent = '–'; renderChatList();
 }
 const side = $('#histPanel'), closeSide = () => side.classList.remove('show');
@@ -383,14 +488,18 @@ $('#newChat').onclick = () => { if (state.busy) return; showChat(null); closeSid
 $('#chatList').addEventListener('click', e => {
   const item = e.target.closest('.chat-item'); if (!item || state.busy) return;
   if (e.target.dataset.act === 'del') {
-    state.chats = state.chats.filter(c => c.id !== item.dataset.id); saveChats();
+    state.chats = readChats().filter(c => c.id !== item.dataset.id); writeChats(state.chats);
     if (state.chatId === item.dataset.id) showChat(null); else renderChatList();
   } else { showChat(state.chats.find(c => c.id === item.dataset.id)); closeSide(); }
 });
 
 function checkAssets() {
-  if (getComputedStyle(document.documentElement).getPropertyValue('--v').trim() !== '4') sysMsg('styles.css is outdated. Upload the latest styles.css and press Ctrl+F5.');
+  if (getComputedStyle(document.documentElement).getPropertyValue('--v').trim() !== '5') sysMsg('styles.css is outdated. Upload the latest styles.css and press Ctrl+F5.');
 }
+
+const flush = () => { if (state.chatId) saveCurrent(); };
+addEventListener('pagehide', flush);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
 
 /* ---------- init ---------- */
 window.addEventListener('load', () => {
@@ -399,7 +508,8 @@ window.addEventListener('load', () => {
   save(LS.profiles, state.profiles);
   const steps = [renderModelSelect, updateStatus, loadData, checkAssets, () => {
     if (load('aicc.sideoff', false)) $('#app').classList.add('side-off');
-    state.chats = load(CH, []); renderChatList(); if (state.chats.length) showChat(state.chats[0]);
+    state.chats = readChats(); renderChatList(); if (state.chats.length) showChat(state.chats[0]);
+    if (corruptNote) sysMsg('Saved chats could not be read. A backup copy was kept in localStorage (aicc.chats.bak).');
   }];
   steps.forEach(fn => { try { fn(); } catch (e) { console.error(e); } });
   if (!state.profiles.some(p => p.key)) { if (!state.profiles.length) state.profiles.push({ id: uid(), vendor: 'deepseek', name: 'DeepSeek', key: '', baseUrl: '', defaultModel: 'deepseek-chat' }); state.primary = state.primary || state.profiles[0].id; openVault(); }

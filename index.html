@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AI Control Center</title>
-<link rel="stylesheet" href="styles.css?v=4">
+<link rel="stylesheet" href="styles.css?v=5">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
-<script src="app.js?v=4" defer></script>
+<script src="app.js?v=5" defer></script>
 </head>
 <body>
 <div id="ticker" aria-label="Market ticker"><div id="tickerTrack"><span class="tk-empty">Loading markets…</span></div></div>
@@ -59,7 +59,7 @@
   <aside id="dataPanel" class="glass">
     <div class="row-head"><h2>Market data</h2><span id="updatedAt" class="mut">–</span></div>
     <div id="metrics"></div>
-    <div class="chartbox"><canvas id="mainChart"></canvas></div>
+    <div class="chartbox"><canvas id="mainChart"></canvas><p id="chartMsg" class="chartmsg mut" hidden></p></div>
     <details><summary>data.json</summary><pre id="jsonView"></pre></details>
   </aside>
 </main>

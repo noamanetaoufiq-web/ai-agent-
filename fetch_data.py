@@ -12,7 +12,10 @@ SYMBOLS = {
     "BTC-USD": "Bitcoin",
     "CL=F": "Crude Oil",
 }
-URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}"
+URLS = [
+    "https://query1.finance.yahoo.com/v8/finance/chart/{}",
+    "https://query2.finance.yahoo.com/v8/finance/chart/{}",   # second host: used when the first one blocks or rate-limits
+]
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ai-control-center/1.0)"}
 
 
@@ -29,7 +32,11 @@ def get(url, params=None, tries=3):
 
 
 def fetch_symbol(sym, name):
-    data = get(URL.format(sym), {"range": "1mo", "interval": "1d"})
+    data = None
+    for u in URLS:
+        data = get(u.format(sym), {"range": "1mo", "interval": "1d"})
+        if data:
+            break
     try:
         res = data["chart"]["result"][0]
         closes = res["indicators"]["quote"][0]["close"]
@@ -37,6 +44,8 @@ def fetch_symbol(sym, name):
             {"d": datetime.fromtimestamp(t, timezone.utc).strftime("%m-%d"), "c": round(c, 4)}
             for t, c in zip(res["timestamp"], closes) if c is not None
         ]
+        if len(hist) < 2:
+            raise ValueError(f"only {len(hist)} close(s) returned")
         price = hist[-1]["c"]
         prev = hist[-2]["c"] if len(hist) > 1 else price
         return {"symbol": sym, "name": name, "price": price,
