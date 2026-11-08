@@ -234,7 +234,7 @@ async function send() {
   const userEl = addMsg('user', shown);
   state.view.push({ role: 'user', text: shown + note });
   media.forEach(m => userEl.appendChild(mediaEl(m)));
-  input.value = ''; state.files = []; renderFiles();
+  input.value = ''; input.style.height = 'auto'; state.files = []; renderFiles();
   let system = $('#systemPrompt').value.trim();
   if ($('#accData').checked && state.data) system += '\n\nLive market data (from data.json):\n' + dataDigest();
   const ai = addMsg('ai', '…'); let out = '', pending = false, finalText = '';
@@ -256,6 +256,7 @@ async function send() {
   } finally { clearInterval(tick); setBusy(false); updateTokens(); state.view.push({ role: 'ai', text: finalText }); saveCurrent(); }
 }
 $('#sendBtn').onclick = send;
+$('#prompt').addEventListener('input', e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'; });
 $('#stopBtn').onclick = () => state.abort && state.abort.abort();
 $('#prompt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 $('#clearBtn').onclick = () => { if (state.busy) return; state.history = []; state.view = []; $('#messages').innerHTML = ''; updateTokens(); $('#latency').textContent = '–'; saveCurrent(); };
@@ -314,12 +315,24 @@ async function loadData() {
   try {
     const r = await fetch('./data.json?t=' + Date.now()); if (!r.ok) throw new Error(r.status);
     state.data = await r.json();
-  } catch { $('#metrics').innerHTML = '<p class="mut">No data.json yet. Run the GitHub Action once.</p>'; return; }
+  } catch (e) {
+    $('#metrics').innerHTML = `<p class="mut">No market data (${esc(e.message)}). Run the "Update data" GitHub Action once.</p>`;
+    $('#tickerTrack').innerHTML = '<span class="tk-empty">Market data unavailable</span>';
+    return;
+  }
   const d = state.data;
+  if (!Array.isArray(d.markets) || !d.markets.length) { $('#metrics').innerHTML = '<p class="mut">data.json has no markets yet.</p>'; return; }
   $('#updatedAt').textContent = d.updated ? 'Updated ' + new Date(d.updated).toLocaleString() : '';
   $('#jsonView').textContent = JSON.stringify(d, null, 1).slice(0, 4000);
   state.symbol = state.symbol || d.markets?.[0]?.symbol;
-  renderMetrics(); drawChart();
+  renderMetrics(); renderTicker(); drawChart();
+}
+function renderTicker() {
+  const ms = state.data.markets, track = $('#tickerTrack');
+  const item = m => { const up = m.change_pct >= 0; return `<span class="tk"><span class="nm">${esc(m.name)}</span><b>${m.price ?? '–'}</b><span class="${up ? 'up' : 'down'}">${up ? '▲' : '▼'} ${Math.abs(m.change_pct ?? 0)}%</span></span>`; };
+  const html = ms.map(item).join('');
+  track.innerHTML = html + html + html + html;
+  track.style.setProperty('--dur', ms.length * 7 + 's'); track.classList.add('live');
 }
 function renderMetrics() {
   $('#metrics').innerHTML = (state.data.markets || []).map(m => {
@@ -362,7 +375,10 @@ function showChat(c) {
   updateTokens(); $('#latency').textContent = '–'; renderChatList();
 }
 const side = $('#histPanel'), closeSide = () => side.classList.remove('show');
-$('#toggleSide').onclick = () => side.classList.toggle('show');
+$('#toggleSide').onclick = () => {
+  if (matchMedia('(max-width:800px)').matches) side.classList.toggle('show');
+  else { const off = $('#app').classList.toggle('side-off'); save('aicc.sideoff', off); }
+};
 $('#newChat').onclick = () => { if (state.busy) return; showChat(null); closeSide(); };
 $('#chatList').addEventListener('click', e => {
   const item = e.target.closest('.chat-item'); if (!item || state.busy) return;
@@ -372,13 +388,20 @@ $('#chatList').addEventListener('click', e => {
   } else { showChat(state.chats.find(c => c.id === item.dataset.id)); closeSide(); }
 });
 
+function checkAssets() {
+  if (getComputedStyle(document.documentElement).getPropertyValue('--v').trim() !== '4') sysMsg('styles.css is outdated. Upload the latest styles.css and press Ctrl+F5.');
+}
+
 /* ---------- init ---------- */
 window.addEventListener('load', () => {
   state.profiles = load(LS.profiles, []); state.primary = load(LS.primary, null);
   state.profiles.forEach(p => { if (p.vendor === 'gemini' && /^gemini-2\.0-flash(-lite)?(-001)?$/.test(p.defaultModel)) p.defaultModel = 'gemini-flash-latest'; });   // 2.0 models are retired
   save(LS.profiles, state.profiles);
-  renderModelSelect(); updateStatus(); loadData();
-  state.chats = load(CH, []); renderChatList(); if (state.chats.length) showChat(state.chats[0]);
+  const steps = [renderModelSelect, updateStatus, loadData, checkAssets, () => {
+    if (load('aicc.sideoff', false)) $('#app').classList.add('side-off');
+    state.chats = load(CH, []); renderChatList(); if (state.chats.length) showChat(state.chats[0]);
+  }];
+  steps.forEach(fn => { try { fn(); } catch (e) { console.error(e); } });
   if (!state.profiles.some(p => p.key)) { if (!state.profiles.length) state.profiles.push({ id: uid(), vendor: 'deepseek', name: 'DeepSeek', key: '', baseUrl: '', defaultModel: 'deepseek-chat' }); state.primary = state.primary || state.profiles[0].id; openVault(); }
 });
 })();
