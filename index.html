@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Control Center</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<header id="topbar" class="glass">
+  <div class="logo"><span class="dot"></span><strong>AI Control Center</strong></div>
+  <span id="statusBadge" class="badge">Checking…</span>
+  <div class="spacer"></div>
+  <label class="sel">Active model <select id="modelSelect"></select></label>
+  <button id="openVault" class="btn" aria-label="Open API Vault">⚙ API Vault</button>
+</header>
+
+<main id="app">
+  <section id="chatPanel" class="glass">
+    <div id="messages" aria-live="polite"></div>
+    <details id="sysWrap"><summary>System prompt</summary>
+      <textarea id="systemPrompt" rows="3" placeholder="You are a precise trading and research assistant…"></textarea>
+    </details>
+    <div id="dropzone">Drop text files here or <label class="link">browse<input id="fileInput" type="file" multiple hidden></label> <span id="fileList"></span></div>
+    <div class="composer">
+      <textarea id="prompt" rows="2" placeholder="Ask anything. Enter to send, Shift+Enter for a new line."></textarea>
+      <button id="sendBtn" class="btn primary">Send</button>
+      <button id="stopBtn" class="btn" hidden>Stop</button>
+    </div>
+    <div class="toolbar">
+      <button id="clearBtn" class="btn sm">Clear</button>
+      <button id="copyBtn" class="btn sm">Copy chat</button>
+      <span class="spacer"></span>
+      <span id="tokenCount">0 tokens</span>
+      <span id="latency">–</span>
+    </div>
+  </section>
+
+  <aside id="dataPanel" class="glass">
+    <div class="row-head"><h2>Market data</h2><span id="updatedAt" class="mut">–</span></div>
+    <div id="metrics"></div>
+    <div class="chartbox"><canvas id="mainChart"></canvas></div>
+    <details><summary>data.json</summary><pre id="jsonView"></pre></details>
+  </aside>
+</main>
+
+<div id="vaultModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="vaultTitle">
+  <div class="modal-card glass">
+    <div class="row-head"><h2 id="vaultTitle">API Vault</h2><button id="closeVault" class="btn sm">Close</button></div>
+    <p class="mut">Keys stay in this browser (localStorage). Requests go straight from your browser to each provider.</p>
+    <div id="vaultList"></div>
+    <div class="toolbar">
+      <button id="addKey" class="btn">+ Add key</button>
+      <span class="spacer"></span>
+      <button id="importCfg" class="btn">Import config</button>
+      <input id="importFile" type="file" accept="application/json" hidden>
+      <button id="exportCfg" class="btn">Export config (JSON)</button>
+      <button id="saveVault" class="btn primary">Save credentials</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>
