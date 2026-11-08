@@ -117,9 +117,15 @@ function updateStatus() {
 }
 
 /* ---------- provider layer ---------- */
+function normalizeBase(b) {
+  b = (b || '').trim();
+  if (!b) return '';
+  if (!/^https?:\/\//i.test(b)) b = 'https://' + b;           // "api.deepseek.com" -> absolute URL
+  return b.replace(/\/+$/, '').replace(/\/(chat\/completions|messages)$/i, '').replace(/\/models\/[^/]*$/i, '');
+}
 async function streamFrom(p, msgs, system, onToken, signal) {
   const pre = PRESETS[p.vendor] || PRESETS.custom;
-  const base = (p.baseUrl || pre.baseUrl).replace(/\/$/, '');
+  const base = normalizeBase(p.baseUrl || pre.baseUrl);
   const model = p.defaultModel || pre.model;
   const headers = { 'Content-Type': 'application/json' };
   let url, body, extract;
@@ -140,8 +146,16 @@ async function streamFrom(p, msgs, system, onToken, signal) {
     body = { model, stream: true, messages: system ? [{ role: 'system', content: system }, ...msgs] : msgs };
     extract = j => j.choices?.[0]?.delta?.content || '';
   }
-  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
-  if (!r.ok) { const t = await r.text().catch(() => ''); const e = new Error(`${r.status} ${t.slice(0, 180)}`); e.status = r.status; throw e; }
+  const u = new URL(url, location.href);
+  let r;
+  try { r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal }); }
+  catch (e) { if (e.name === 'AbortError') throw e; throw new Error(`cannot reach ${u.host} (network, CORS, adblock or VPN)`); }
+  if (!r.ok) {
+    const t = await r.text().catch(() => ''); let msg = t;
+    try { const j = JSON.parse(t); msg = j.error?.message || j.error || j.message || t; } catch { /* not JSON */ }
+    msg = String(typeof msg === 'string' ? msg : JSON.stringify(msg)).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    const e = new Error(`${r.status} from ${u.host}${u.pathname}: ${msg || 'empty response'}`); e.status = r.status; throw e;
+  }
   const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
   for (;;) {
     const { done, value } = await reader.read(); if (done) break;
