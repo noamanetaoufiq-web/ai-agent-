@@ -17,7 +17,7 @@ const PRESETS = {
   custom:     { label: 'Custom (OpenAI-compatible)', type: 'openai', baseUrl: '', model: '' }
 };
 
-const state = { profiles: [], primary: null, history: [], files: [], busy: false, abort: null, chart: null, data: null, symbol: null };
+const state = { chats: [], chatId: null, view: [], profiles: [], primary: null, history: [], files: [], busy: false, abort: null, chart: null, data: null, symbol: null };
 
 /* ---------- helpers ---------- */
 const load = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } };
@@ -229,12 +229,15 @@ async function send() {
   const textFiles = state.files.filter(f => f.kind === 'text'), media = state.files.filter(f => f.kind === 'media');
   const full = (text || 'Describe the attached file(s).') + textFiles.map(f => `\n\n[File: ${f.name}]\n${f.text}`).join('');
   const note = media.length ? `\n[attached: ${media.map(m => m.name).join(', ')}]` : '';
-  const userEl = addMsg('user', text + (textFiles.length ? `\n(+${textFiles.length} text file${textFiles.length > 1 ? 's' : ''})` : ''));
+  ensureChat(text || (media[0] && media[0].name) || 'New chat');
+  const shown = text + (textFiles.length ? `\n(+${textFiles.length} text file${textFiles.length > 1 ? 's' : ''})` : '');
+  const userEl = addMsg('user', shown);
+  state.view.push({ role: 'user', text: shown + note });
   media.forEach(m => userEl.appendChild(mediaEl(m)));
   input.value = ''; state.files = []; renderFiles();
   let system = $('#systemPrompt').value.trim();
   if ($('#accData').checked && state.data) system += '\n\nLive market data (from data.json):\n' + dataDigest();
-  const ai = addMsg('ai', '…'); let out = '', pending = false;
+  const ai = addMsg('ai', '…'); let out = '', pending = false, finalText = '';
   const t0 = performance.now(); let tFirst = 0;
   state.abort = new AbortController(); setBusy(true);
   const tick = setInterval(() => { if (!out) ai.textContent = `Waiting for a reply… ${Math.round((performance.now() - t0) / 1000)} s`; }, 1000);
@@ -244,18 +247,18 @@ async function send() {
       onToken: t => { if (!tFirst) tFirst = performance.now() - t0; out += t; if (!pending) { pending = true; raf(() => { ai.innerHTML = md(out); pending = false; scrollDown(); }); } },
       onFallback: (p, e) => sysMsg(`${p.name} failed (${e.message.slice(0, 80)}). Trying next key…`)
     });
-    ai.innerHTML = md(out);
+    ai.innerHTML = md(out); finalText = out;
     state.history.push({ role: 'user', content: full + note }, { role: 'assistant', content: out });
     $('#latency').textContent = `${p.name} · first token ${Math.round(tFirst)} ms · total ${((performance.now() - t0) / 1000).toFixed(1)} s`;
   } catch (e) {
-    if (e.name === 'AbortError') { ai.innerHTML = md(out || 'Stopped.'); if (out) state.history.push({ role: 'user', content: full + note }, { role: 'assistant', content: out }); }
-    else ai.innerHTML = md(`**Error:** ${e.message}`);
-  } finally { clearInterval(tick); setBusy(false); updateTokens(); }
+    if (e.name === 'AbortError') { finalText = out || 'Stopped.'; ai.innerHTML = md(finalText); if (out) state.history.push({ role: 'user', content: full + note }, { role: 'assistant', content: out }); }
+    else { finalText = `**Error:** ${e.message}`; ai.innerHTML = md(finalText); }
+  } finally { clearInterval(tick); setBusy(false); updateTokens(); state.view.push({ role: 'ai', text: finalText }); saveCurrent(); }
 }
 $('#sendBtn').onclick = send;
 $('#stopBtn').onclick = () => state.abort && state.abort.abort();
 $('#prompt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
-$('#clearBtn').onclick = () => { state.history = []; $('#messages').innerHTML = ''; updateTokens(); $('#latency').textContent = '–'; };
+$('#clearBtn').onclick = () => { if (state.busy) return; state.history = []; state.view = []; $('#messages').innerHTML = ''; updateTokens(); $('#latency').textContent = '–'; saveCurrent(); };
 $('#copyBtn').onclick = () => navigator.clipboard.writeText(state.history.map(m => `${m.role}: ${m.content}`).join('\n\n')).then(() => sysMsg('Chat copied.'));
 $('#systemPrompt').value = load(LS.system, '');
 $('#systemPrompt').addEventListener('input', e => save(LS.system, e.target.value));
@@ -299,11 +302,12 @@ $('#accData').checked = !!acc.data; $('#accSearch').checked = !!acc.search;
 $('#accessWrap').addEventListener('change', () => save('aicc.access', { data: $('#accData').checked, search: $('#accSearch').checked }));
 const dataDigest = () => JSON.stringify((state.data.markets || []).map(m => ({ name: m.name, symbol: m.symbol, price: m.price, change_pct: m.change_pct, last7: m.history.slice(-7).map(h => h.c) })));
 
-const dz = $('#dropzone');
+const dz = $('#chatPanel');
 ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('over'); }));
 ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('over'); }));
-dz.addEventListener('drop', e => addFiles(e.dataTransfer.files));
-$('#fileInput').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
+dz.addEventListener('drop', e => addFiles([...e.dataTransfer.files]));
+$('#fileInput').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
+$('#attachBtn').onclick = () => $('#fileInput').click();
 
 /* ---------- data.json ---------- */
 async function loadData() {
@@ -336,12 +340,45 @@ function drawChart() {
   });
 }
 
+/* ---------- chat history ---------- */
+const CH = 'aicc.chats';
+function saveChats() { try { localStorage.setItem(CH, JSON.stringify(state.chats)); } catch { sysMsg('History not saved: browser storage is full. Delete old chats.'); } }
+function ensureChat(title) {
+  if (state.chatId) return;
+  const c = { id: uid(), title: title.slice(0, 40), updated: Date.now(), history: state.history, view: state.view };
+  state.chats.unshift(c); state.chatId = c.id; renderChatList();
+}
+function saveCurrent() {
+  const c = state.chats.find(x => x.id === state.chatId); if (!c) return;
+  c.history = state.history; c.view = state.view; c.updated = Date.now();
+  state.chats.sort((a, b) => b.updated - a.updated); saveChats(); renderChatList();
+}
+function renderChatList() {
+  $('#chatList').innerHTML = state.chats.map(c => `<div class="chat-item ${c.id === state.chatId ? 'active' : ''}" data-id="${c.id}"><button type="button" class="chat-open" data-act="open" title="${esc(c.title)}">${esc(c.title || 'New chat')}</button><button type="button" class="chat-del" data-act="del" aria-label="Delete chat">×</button></div>`).join('') || '<p class="mut">No chats yet.</p>';
+}
+function showChat(c) {
+  state.chatId = c ? c.id : null; state.history = c ? c.history : []; state.view = c ? c.view : [];
+  $('#messages').innerHTML = ''; state.view.forEach(m => addMsg(m.role, m.text));
+  updateTokens(); $('#latency').textContent = '–'; renderChatList();
+}
+const side = $('#histPanel'), closeSide = () => side.classList.remove('show');
+$('#toggleSide').onclick = () => side.classList.toggle('show');
+$('#newChat').onclick = () => { if (state.busy) return; showChat(null); closeSide(); };
+$('#chatList').addEventListener('click', e => {
+  const item = e.target.closest('.chat-item'); if (!item || state.busy) return;
+  if (e.target.dataset.act === 'del') {
+    state.chats = state.chats.filter(c => c.id !== item.dataset.id); saveChats();
+    if (state.chatId === item.dataset.id) showChat(null); else renderChatList();
+  } else { showChat(state.chats.find(c => c.id === item.dataset.id)); closeSide(); }
+});
+
 /* ---------- init ---------- */
 window.addEventListener('load', () => {
   state.profiles = load(LS.profiles, []); state.primary = load(LS.primary, null);
   state.profiles.forEach(p => { if (p.vendor === 'gemini' && /^gemini-2\.0-flash(-lite)?(-001)?$/.test(p.defaultModel)) p.defaultModel = 'gemini-flash-latest'; });   // 2.0 models are retired
   save(LS.profiles, state.profiles);
   renderModelSelect(); updateStatus(); loadData();
+  state.chats = load(CH, []); renderChatList(); if (state.chats.length) showChat(state.chats[0]);
   if (!state.profiles.some(p => p.key)) { if (!state.profiles.length) state.profiles.push({ id: uid(), vendor: 'deepseek', name: 'DeepSeek', key: '', baseUrl: '', defaultModel: 'deepseek-chat' }); state.primary = state.primary || state.profiles[0].id; openVault(); }
 });
 })();
