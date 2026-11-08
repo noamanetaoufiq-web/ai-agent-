@@ -169,6 +169,7 @@ async function streamFrom(p, msgs, system, onToken, signal) {
   }
 }
 
+const FIRST_TOKEN_MS = 30000, IDLE_MS = 60000;
 /* unified entry point with automatic fallback */
 async function callAIProvider(prompt, { history = [], system = '', onToken, onFallback, signal } = {}) {
   const usable = state.profiles.filter(p => p.key);
@@ -177,16 +178,22 @@ async function callAIProvider(prompt, { history = [], system = '', onToken, onFa
   const msgs = [...history, { role: 'user', content: prompt }];
   let lastErr;
   for (const p of order) {
-    let emitted = false;
+    let emitted = false, timedOut = false, timer;
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort();
+    if (signal) signal.addEventListener('abort', onAbort);
+    const arm = ms => { clearTimeout(timer); timer = setTimeout(() => { timedOut = true; ctl.abort(); }, ms); };
+    arm(FIRST_TOKEN_MS);
     try {
-      await streamFrom(p, msgs, system, t => { emitted = true; onToken(t); }, signal);
+      await streamFrom(p, msgs, system, t => { emitted = true; arm(IDLE_MS); onToken(t); }, ctl.signal);
       return p;
     } catch (e) {
-      if (e.name === 'AbortError') throw e;
+      if (timedOut) e = new Error(emitted ? `${p.name} stalled for ${IDLE_MS / 1000} s` : `${p.name} gave no answer within ${FIRST_TOKEN_MS / 1000} s`);
+      else if (e.name === 'AbortError') throw e;
       lastErr = e;
       if (emitted) throw e;                       // already streaming: do not mix providers
       onFallback && onFallback(p, e);
-    }
+    } finally { clearTimeout(timer); if (signal) signal.removeEventListener('abort', onAbort); }
   }
   throw lastErr;
 }
@@ -214,6 +221,7 @@ async function send() {
   const ai = addMsg('ai', '…'); let out = '', pending = false;
   const t0 = performance.now(); let tFirst = 0;
   state.abort = new AbortController(); setBusy(true);
+  const tick = setInterval(() => { if (!out) ai.textContent = `Waiting for a reply… ${Math.round((performance.now() - t0) / 1000)} s`; }, 1000);
   try {
     const p = await callAIProvider(full, {
       history: state.history, system: $('#systemPrompt').value.trim(), signal: state.abort.signal,
@@ -226,7 +234,7 @@ async function send() {
   } catch (e) {
     if (e.name === 'AbortError') { ai.innerHTML = md(out || 'Stopped.'); if (out) state.history.push({ role: 'user', content: full }, { role: 'assistant', content: out }); }
     else ai.innerHTML = md(`**Error:** ${e.message}`);
-  } finally { setBusy(false); updateTokens(); }
+  } finally { clearInterval(tick); setBusy(false); updateTokens(); }
 }
 $('#sendBtn').onclick = send;
 $('#stopBtn').onclick = () => state.abort && state.abort.abort();
