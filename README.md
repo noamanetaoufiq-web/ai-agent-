@@ -28,3 +28,6 @@ Model names change often, so do not guess. In **API Vault**, paste the key and p
 
 ## Chats
 Saved in localStorage (`aicc.chats`): your question is saved before the request starts, the answer while it streams, and again when you leave the page. Tabs merge instead of overwriting each other, and unreadable data is copied to `aicc.chats.bak`.
+
+## Refresh rate
+Prices refresh in the browser every 60 s (Yahoo direct, public CORS proxy as fallback; if both fail, data.json values stay). The GitHub Action runs every 15 min to rebuild the 30-day history; Actions cannot run every minute (5 min minimum, often delayed).

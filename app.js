@@ -396,6 +396,7 @@ async function loadData() {
   try { $('#jsonView').textContent = JSON.stringify(d, null, 1).slice(0, 4000); } catch (e) { console.error(e); }
   if (!d.markets.some(m => m.symbol === state.symbol)) state.symbol = d.markets[0].symbol;
   [renderMetrics, renderTicker, drawChart].forEach(fn => { try { fn(); } catch (e) { console.error(fn.name, e); } });
+  startLive();
 }
 function renderTicker() {
   const ms = state.data.markets, track = $('#tickerTrack');
@@ -425,6 +426,45 @@ function drawChart() {
     data: { labels: m.history.map(h => h.d), datasets: [{ label: m.name, data: m.history.map(h => h.c), borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,.12)', fill: true, tension: .25, pointRadius: 0, borderWidth: 2 }] },
     options: { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b8b95', maxTicksLimit: 6 }, grid: { display: false } }, y: { ticks: { color: '#8b8b95' }, grid: { color: 'rgba(255,255,255,.05)' } } } }
   });
+}
+
+/* ---------- live prices: browser refreshes every 60 s (data.json keeps the 30-day history) ---------- */
+const LIVE_MS = 60000; let liveTimer = 0, liveBusy = false;
+async function liveQuote(sym) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=1m`;
+  for (const u of [url, 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url)]) {   // direct first, public CORS proxy as fallback
+    try {
+      const r = await fetch(u, { cache: 'no-store' }); if (!r.ok) continue;
+      const meta = (await r.json()).chart.result[0].meta;
+      const price = num(meta.regularMarketPrice), prev = num(meta.chartPreviousClose ?? meta.previousClose);
+      if (price !== null) return { price, change_pct: prev ? Math.round((price - prev) / prev * 10000) / 100 : 0 };
+    } catch { /* try next route */ }
+  }
+  return null;
+}
+async function refreshLive() {
+  if (liveBusy || document.hidden || !state.data || !state.data.markets.length) return;
+  liveBusy = true;
+  try {
+    const ms = state.data.markets, qs = await Promise.all(ms.map(m => liveQuote(m.symbol)));
+    let ok = 0;
+    ms.forEach((m, i) => {
+      const q = qs[i]; if (!q) return; ok++;
+      m.price = q.price; m.change_pct = q.change_pct;
+      const d = new Date().toISOString().slice(5, 10), last = m.history[m.history.length - 1];
+      if (last && last.d === d) last.c = q.price; else m.history.push({ d, c: q.price });
+    });
+    if (!ok) return;   // keep what data.json shows
+    $('#updatedAt').textContent = 'Live ' + new Date().toLocaleTimeString();
+    const tk = $('#tickerTrack'), anim = tk.getAnimations ? tk.getAnimations()[0] : null, t = anim ? anim.currentTime : null;
+    [renderMetrics, renderTicker, drawChart].forEach(fn => { try { fn(); } catch (e) { console.error(fn.name, e); } });
+    const a2 = tk.getAnimations ? tk.getAnimations()[0] : null; if (a2 && t != null) a2.currentTime = t;   // marquee does not jump
+  } finally { liveBusy = false; }
+}
+function startLive() {
+  if (liveTimer) return;
+  refreshLive(); liveTimer = setInterval(refreshLive, LIVE_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshLive(); });
 }
 
 /* ---------- chat history ---------- */
