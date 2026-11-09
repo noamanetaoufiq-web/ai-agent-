@@ -44,3 +44,8 @@ Prices refresh in the browser every 60 s (Yahoo direct, public CORS proxy as fal
 - **5m bars** for signals, **1m** only for confirmation (`m1`).
 - **Win rate = backtest, never a guess.** `backtest.py` (workflow "Daily backtest": run it once by hand) replays every signal: BTC about 365 days of Binance 5m (real delta), Gold GC / Nasdaq NQ / others about 60 days of Yahoo 5m (Yahoo's limit for 5m). It writes `backtest.json` (stop 1 ATR, target 2 ATR, max 2 h, no fees). Every 15 min `fetch_data.py` attaches to each ACTIVE signal the stats of the same signal + session + with/against the daily trend (`of.match`). "positive" is weak evidence: random data produces some by chance.
 - Mode **Setup validator** scores a setup with a 5-check scorecard. After updating, the system prompt is replaced once by the new preset.
+
+## Fresh data at every message
+- While the page is open, prices and order flow are recomputed **in the browser every 60 s and again right before each message** (BTC from Binance 1m klines with real taker volume, the others from Yahoo 1m, direct or through a public CORS proxy). If a source fails, the 15-minute `data.json` values stay and `meta` tells the agent how old they are.
+- Historical stats (`backtest.json`) are loaded by the page too and matched to the live signals. If the file is missing the agent is told, and the chat shows a warning: run the "Daily backtest" workflow.
+- Browser access to Binance/Yahoo (CORS) was not tested here: open the console if `flow` never appears next to "Live".
