@@ -31,3 +31,9 @@ Saved in localStorage (`aicc.chats`): your question is saved before the request 
 
 ## Refresh rate
 Prices refresh in the browser every 60 s (Yahoo direct, public CORS proxy as fallback; if both fail, data.json values stay). The GitHub Action runs every 15 min to rebuild the 30-day history; Actions cannot run every minute (5 min minimum, often delayed).
+
+## Trading agent
+- **Modes** (System prompt > Mode): Trading analyst, Order flow, Technical analysis, Risk manager, General. Picking a mode loads its prompt and switches on "read the market data" (General switches it off). You can edit the prompt afterwards.
+- `fetch_data.py` adds, per market: RSI14, SMA20/50, ATR14, 30-day high/low, and an **order-flow estimate** ported from `tradingview/Order_Flow_Suite_v2_1_SessionVP.pine` (15m bars from 1m candles: delta, CVD and divergences, Pulse breakouts/traps, imbalance zones, liquidity walls, block trades, Volume Profile POC/VAH/VAL, Daily/Asian/London/NY session profiles).
+- It is a **proxy**: an up-close candle counts as buy volume. It is not a footprint or DOM. Yahoo gives no volume for EUR/USD, so that market has no order flow. Yahoo keeps only about 5-7 days of 1m data.
+- The Pine script is included for TradingView; it needs a plan that allows lower-timeframe data.

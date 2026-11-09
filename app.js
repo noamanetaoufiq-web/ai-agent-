@@ -358,7 +358,7 @@ $('#prompt').addEventListener('paste', e => { const fs = [...(e.clipboardData?.f
 const acc = load('aicc.access', { data: false, search: false });
 $('#accData').checked = !!acc.data; $('#accSearch').checked = !!acc.search;
 $('#accessWrap').addEventListener('change', () => save('aicc.access', { data: $('#accData').checked, search: $('#accSearch').checked }));
-const dataDigest = () => JSON.stringify((state.data.markets || []).map(m => ({ name: m.name, symbol: m.symbol, price: m.price, change_pct: m.change_pct, last7: m.history.slice(-7).map(h => h.c) })));
+const dataDigest = () => JSON.stringify((state.data.markets || []).map(m => ({ name: m.name, symbol: m.symbol, price: m.price, change_pct: m.change_pct, last7: m.history.slice(-7).map(h => h.c), ind: m.indicators || undefined, of: m.orderflow || undefined })));
 
 const dz = $('#chatPanel');
 ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('over'); }));
@@ -541,12 +541,37 @@ const flush = () => { if (state.chatId) saveCurrent(); };
 addEventListener('pagehide', flush);
 document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
 
+/* ---------- agent modes (system prompt presets) ---------- */
+const DATA_GUIDE = `Market data fields: price, change_pct (vs previous close), last7 (last 7 daily closes). ind = daily indicators (rsi14, sma20, sma50, atr14, hi30/lo30 = 30-day high/low, chg5d_pct, trend). of = ESTIMATED order flow on 15-minute bars built from 1-minute candles (an up-close candle counts as buy volume, a down-close as sell volume). It is a proxy, NOT a real footprint or DOM. delta = buy minus sell volume of the last bar; rel_delta = delta / 20-bar average volume; cvd = cumulative delta; cvd_chg_12 = CVD change over the last 12 bars; signals = recent Pulse breakouts/traps and CVD divergences; imbalance_zones = unmitigated 3x buy/sell imbalance zones; walls = volume-spike swing highs/lows not yet broken (liquidity proxy); blocks = recent high-volume bars; vp200 = POC/VAH/VAL of the last 200 bars; sessions = POC/VAH/VAL of the previous (prev) and current (cur) Daily, Asian (00-08 UTC), London (08-16) and New York (13-21) profiles. A market without "of" has no usable volume (for example EUR/USD).`;
+const COMMON = `Rules: base every answer on the market data in this chat and quote exact numbers. If data is missing or old, say so. Never invent prices, news or indicators. Separate facts from opinion. Never promise profit. Always give the main risk and what would invalidate the idea. Answer in the user's language (Darija, Arabic, French or English), short and structured. End with: Not financial advice.`;
+const MODES = {
+  trading: { label: 'Trading analyst', data: true, prompt: `You are a disciplined trading and market-research assistant for gold, EUR/USD, S&P 500, Nasdaq, Bitcoin and crude oil.\nFor each idea give: bias (bullish/bearish/neutral), key levels, entry zone, stop-loss, take-profit, risk/reward and the invalidation. Combine daily indicators with order-flow evidence when available.\n${DATA_GUIDE}\n${COMMON}` },
+  orderflow: { label: 'Order flow', data: true, prompt: `You are an order-flow analyst. Read the "of" block of each market: delta, rel_delta, CVD trend and divergences, Pulse breakouts/traps, imbalance zones, liquidity walls, block trades and the Volume Profile levels (POC/VAH/VAL, daily and sessions). Look for confluence (for example price at a session POC with a CVD divergence and an unmitigated imbalance zone) and say which levels matter and why. Always remind the user this is a 1-minute-candle proxy, not true footprint or DOM data.\n${DATA_GUIDE}\n${COMMON}` },
+  technical: { label: 'Technical analysis', data: true, prompt: `You are a technical analyst. Use only daily data: price versus SMA20/SMA50, RSI14 (overbought above 70, oversold below 30), ATR14 for volatility, the 30-day high/low range and the last 7 closes. Describe trend, momentum, support and resistance, and give a scenario for each direction.\n${DATA_GUIDE}\n${COMMON}` },
+  risk: { label: 'Risk manager', data: true, prompt: `You are a risk manager. Ask for account size, risk per trade (default 1%), entry and stop if missing. Compute position size, risk amount and reward/risk. Suggest stop distances from ATR14 (for example 1 to 1.5 x ATR14) and warn about oversized positions, correlated trades (S&P 500 and Nasdaq, gold and EUR/USD) and trading into high volatility.\n${DATA_GUIDE}\n${COMMON}` },
+  general: { label: 'General assistant', data: false, prompt: '' }
+};
+function applyMode(key, force) {
+  const m = MODES[key]; if (!m) return;
+  save('aicc.mode', key);
+  if (!force) return;
+  $('#systemPrompt').value = m.prompt; save(LS.system, m.prompt);
+  $('#accData').checked = m.data; save('aicc.access', { data: $('#accData').checked, search: $('#accSearch').checked });
+}
+function initModes() {
+  const sel = $('#modeSelect');
+  sel.innerHTML = Object.entries(MODES).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
+  sel.value = MODES[load('aicc.mode', 'trading')] ? load('aicc.mode', 'trading') : 'trading';
+  if (!$('#systemPrompt').value.trim()) applyMode(sel.value, true);   // first visit: preload the prompt, never overwrite your own text
+  sel.onchange = () => applyMode(sel.value, true);
+}
+
 /* ---------- init ---------- */
 window.addEventListener('load', () => {
   state.profiles = load(LS.profiles, []); state.primary = load(LS.primary, null);
   state.profiles.forEach(p => { if (p.vendor === 'gemini' && /^gemini-2\.0-flash(-lite)?(-001)?$/.test(p.defaultModel)) p.defaultModel = 'gemini-flash-latest'; });   // 2.0 models are retired
   save(LS.profiles, state.profiles);
-  const steps = [renderModelSelect, updateStatus, loadData, checkAssets, () => {
+  const steps = [renderModelSelect, updateStatus, loadData, checkAssets, initModes, () => {
     if (load('aicc.sideoff', false)) $('#app').classList.add('side-off');
     state.chats = readChats(); renderChatList(); if (state.chats.length) showChat(state.chats[0]);
     if (corruptNote) sysMsg('Saved chats could not be read. A backup copy was kept in localStorage (aicc.chats.bak).');
