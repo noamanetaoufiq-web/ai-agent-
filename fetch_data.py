@@ -11,7 +11,7 @@ import json, sys, time
 from datetime import datetime, timezone
 import requests
 
-SYMBOLS = {"GC=F": "Gold (GC futures)", "EURUSD=X": "EUR/USD", "^GSPC": "S&P 500", "NQ=F": "Nasdaq (NQ futures)", "BTC-USD": "Bitcoin", "CL=F": "Crude Oil"}
+SYMBOLS = {"GC=F": "Gold (GC futures)", "XAUUSD=X": "Gold spot (XAUUSD)", "EURUSD=X": "EUR/USD", "^GSPC": "S&P 500", "NQ=F": "Nasdaq (NQ futures)", "BTC-USD": "Bitcoin", "CL=F": "Crude Oil"}
 URLS = [
     "https://query1.finance.yahoo.com/v8/finance/chart/{}",
     "https://query2.finance.yahoo.com/v8/finance/chart/{}",   # second host: used when the first one blocks or rate-limits
@@ -20,6 +20,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ai-control-center/1.0)"}
 TF = 300   # order-flow bar = 5 minutes (confirmation uses 1-minute data)
 CRYPTO = {"BTC-USD": "BTCUSDT"}
 BINANCE = ["https://data-api.binance.vision/api/v3/klines", "https://api.binance.com/api/v3/klines", "https://api.binance.us/api/v3/klines"]
+ROWS1M = {}   # 1-minute candles per symbol, used to measure the futures/spot basis
 SIG_DIR = {"Pulse BUY breakout": 1, "Pulse SELL breakout": -1, "Trapped sellers": 1, "Trapped buyers": -1, "CVD bullish divergence": 1, "CVD bearish divergence": -1}
 
 
@@ -329,6 +330,7 @@ def process(sym, name):
             rows = binance_rows(pair, "1m", 7200); real = bool(rows)
         if not rows:
             rows = yahoo_rows(sym, "1m", "5d")
+        ROWS1M[sym] = rows
         of = order_flow(agg(rows, TF), m["indicators"]["atr14"], m["indicators"]["sma20"])
         if of:
             of["real_delta"], of["age_min"], of["m1"] = real, round((time.time() - rows[-1][0]) / 60), confirm(agg(rows, 60))
@@ -337,6 +339,35 @@ def process(sym, name):
     except Exception as e:
         print(f"  order flow failed: {e}")
     return m
+
+
+def basis_from_rows(fut, spot, k=30):
+    """Futures minus spot, measured on the SAME minutes (median of the last k overlapping 1m closes). Never compare prices of different times."""
+    sp = {t - t % 60: c for t, o, h, l, c, v, b in spot}
+    d = [c - sp[t - t % 60] for t, o, h, l, c, v, b in fut[-240:] if t - t % 60 in sp][-k:]
+    if len(d) < 10:
+        return None
+    s = sorted(d)
+    return {"basis": s[len(s) // 2], "n": len(d), "spread": round(max(d) - min(d), 2)}
+
+
+def attach_spot(markets):
+    """Order flow comes from GC futures, but you trade spot XAUUSD: give every GC level already converted to spot (level - basis)."""
+    by = {m["symbol"]: m for m in markets}
+    gc = by.get("GC=F")
+    if not gc or not gc.get("orderflow") or "XAUUSD=X" not in by:
+        return
+    bs = basis_from_rows(ROWS1M.get("GC=F", []), ROWS1M.get("XAUUSD=X", []))
+    if not bs:
+        print("  spot basis: not enough overlapping minutes"); return
+    of, b = gc["orderflow"], bs["basis"]
+    r = lambda x: None if x is None else round(x - b, 2)
+    prof = lambda p: p and {k: r(v) for k, v in p.items()}
+    of["spot"] = {"note": "XAUUSD spot level = GC futures level minus basis. Use these for spot trades.", "basis": round(b, 2), "basis_samples": bs["n"], "basis_spread": bs["spread"],
+                  "vp200": prof(of["vp200"]), "sessions": {n: {k: prof(v) for k, v in d.items()} for n, d in of["sessions"].items()},
+                  "imbalance_zones": [{**z, "top": r(z["top"]), "bottom": r(z["bottom"])} for z in of["imbalance_zones"]],
+                  "walls": [{**w, "price": r(w["price"])} for w in of["walls"]], "blocks": [{**x, "price": r(x["price"])} for x in of["blocks"]]}
+    print(f"  spot basis GC - XAUUSD = {b:.2f} ({bs['n']} minutes, spread {bs['spread']})")
 
 
 def main():
@@ -349,6 +380,7 @@ def main():
         of = m["orderflow"]
         print(f"  ok: {m['price']} ({m['change_pct']}%) order flow: " + (f"yes, real_delta={of['real_delta']}, age {of['age_min']} min" if of else "no volume/intraday data"))
         markets.append(m)
+    attach_spot(markets)
     if not markets:
         print("No data fetched; keeping the previous data.json")
         sys.exit(1)

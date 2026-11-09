@@ -53,3 +53,8 @@ Prices refresh in the browser every 60 s (Yahoo direct, public CORS proxy as fal
 ## Speed and history on first run
 - BTC price streams live over a Binance websocket (about every 3 s on screen). Other prices refresh every 15 s, order flow every 60 s and before each message. Gold (GC) and Nasdaq (NQ) from Yahoo stay about 10-15 min behind: that is Yahoo's delay, polling faster cannot fix it.
 - "Update data" now builds `backtest.json` by itself when it is missing or older than 24 h (BTC needs a few minutes the first time). After pushing the repo, run "Update data" once and wait for it to finish: from then on the history is already there.
+
+## Gold: analyse GC futures, trade XAUUSD spot
+- Order flow, volume profile and the backtest come from **GC futures** (spot has no volume). The workflow also fetches **XAUUSD=X** (spot) and measures the **basis** (GC minus spot) on the same 1-minute candles, then converts every GC level to spot: `of.spot` in the GC market, `of.m1.last_close_spot` live.
+- Spot daily history (RSI, SMA, ATR, 30-day range) comes from XAUUSD=X itself (Yahoo has it from 2003).
+- Basis jumps when the futures contract rolls (every ~2 months) and moves with interest rates. Check `basis_spread` and do not trade spot levels converted across a roll.
