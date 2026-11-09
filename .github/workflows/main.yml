@@ -11,19 +11,27 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: data-update
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install requests
+      - name: Build historical backtest if missing or older than 24 h
+        run: python backtest.py --if-stale || echo "backtest failed, continuing"
       - run: python fetch_data.py
       - name: Commit and push if data.json changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data.json
-          git diff --cached --quiet || (git commit -m "chore: update data.json" && git pull --rebase -q && git push)
+          [ -f backtest.json ] && git add backtest.json || true
+          git diff --cached --quiet || (git commit -m "chore: update data" && git pull --rebase -q && git push)

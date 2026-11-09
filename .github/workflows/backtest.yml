@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: data-update
+  cancel-in-progress: false
+
 jobs:
   backtest:
     runs-on: ubuntu-latest
