@@ -1,1 +1,740 @@
+//@version=5
+indicator("Order Flow Suite", shorttitle="OF Suite", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_polylines_count=100)
 
+// =====================================================================
+//  INPUTS  (kol module 3ndo ON/OFF f Settings)
+// =====================================================================
+gG = "0) General"
+ltfIn   = input.timeframe("1", "Lower TF (intrabar data)", group=gG, tooltip="Khass ykon sghar mn timeframe dyal chart. Mital: chart 5m/15m + LTF 1m")
+
+g1 = "1) Volume Profile"
+enVP    = input.bool(true, "Enable Volume Profile", group=g1)
+vpBars  = input.int(200, "Lookback bars", minval=20, maxval=500, group=g1)
+vpRows  = input.int(30, "Rows", minval=10, maxval=100, group=g1)
+vaPct   = input.float(70.0, "Value Area %", minval=50, maxval=95, group=g1) / 100.0
+vpWidth = input.int(30, "Histogram width (bars)", minval=5, maxval=100, group=g1)
+colVA   = input.color(color.new(color.blue, 60), "Value Area color", group=g1)
+colOut  = input.color(color.new(color.gray, 75), "Outside VA color", group=g1)
+colPOC  = input.color(color.yellow, "POC color", group=g1)
+
+g2 = "2) CVD + Divergence"
+enCVD   = input.bool(true, "Enable CVD Divergence", group=g2)
+cvdPiv  = input.int(5, "Pivot length", minval=2, maxval=30, group=g2)
+
+g3 = "3) Order Flow Pulse"
+enPulse = input.bool(true, "Enable Pulse", group=g3)
+pulseLen = input.int(20, "Avg volume length", minval=5, group=g3)
+pulseThr = input.float(0.6, "Pulse threshold (delta / avg volume)", minval=0.1, step=0.05, group=g3)
+brkLen  = input.int(10, "Breakout lookback", minval=3, group=g3)
+
+g4 = "4) Volume Imbalance"
+enImb   = input.bool(true, "Enable Imbalance Zones", group=g4)
+imbRatio = input.float(3.0, "Imbalance ratio (x)", minval=1.5, step=0.5, group=g4, tooltip="3.0 = buyers 3x sellers (wla l3aks)")
+imbMax  = input.int(20, "Max active zones", minval=1, maxval=100, group=g4)
+colImbB = input.color(color.new(color.green, 75), "Buy imbalance color", group=g4)
+colImbS = input.color(color.new(color.red, 75), "Sell imbalance color", group=g4)
+
+g5 = "5) Liquidity Walls (DOM proxy)"
+enWall  = input.bool(true, "Enable Walls~", group=g5)
+wallLen = input.int(5, "Pivot length", minval=2, maxval=30, group=g5)
+wallMult = input.float(2.0, "Volume spike x avg", minval=1.2, step=0.1, group=g5)
+wallMax = input.int(10, "Max active walls", minval=1, maxval=50, group=g5)
+
+g6 = "6) Time & Sales (Block trades proxy)"
+enTS    = input.bool(true, "Enable Block Trades + Table", group=g6)
+tsMult  = input.float(2.5, "Block = volume x avg", minval=1.5, step=0.1, group=g6)
+tsPosS  = input.string("Top Right", "Table position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group=g6)
+
+posMap(s) =>
+    s == "Top Left" ? position.top_left : s == "Top Right" ? position.top_right : s == "Bottom Left" ? position.bottom_left : position.bottom_right
+
+// =====================================================================
+//  INTRABAR BUY / SELL VOLUME  (base dyal CVD, Pulse, Imbalance, T&S)
+// =====================================================================
+[ltfO, ltfC, ltfV] = request.security_lower_tf(syminfo.tickerid, ltfIn, [open, close, volume])
+
+float buyV  = 0.0
+float sellV = 0.0
+if ltfV.size() > 0
+    for i = 0 to ltfV.size() - 1
+        if ltfC.get(i) >= ltfO.get(i)
+            buyV += ltfV.get(i)
+        else
+            sellV += ltfV.get(i)
+else
+    buyV  := close >= open ? volume : 0.0
+    sellV := close <  open ? volume : 0.0
+
+float delta = buyV - sellV
+float cvd   = ta.cum(delta)
+float avgVol = ta.sma(volume, pulseLen)
+
+// =====================================================================
+//  1) VOLUME PROFILE  (POC / VAH / VAL)
+// =====================================================================
+float vpHi = ta.highest(high, vpBars)
+float vpLo = ta.lowest(low, vpBars)
+
+var array<box>   vpBoxes  = array.new<box>()
+var array<line>  vpLines  = array.new<line>()
+var array<label> vpLabels = array.new<label>()
+
+if enVP and barstate.islast
+    while vpBoxes.size() > 0
+        box.delete(vpBoxes.pop())
+    while vpLines.size() > 0
+        line.delete(vpLines.pop())
+    while vpLabels.size() > 0
+        label.delete(vpLabels.pop())
+
+    float step = (vpHi - vpLo) / vpRows
+    if step > 0
+        array<float> vol = array.new_float(vpRows, 0.0)
+        for i = 0 to math.min(vpBars, bar_index + 1) - 1
+            float h = high[i]
+            float l = low[i]
+            float v = volume[i]
+            float rng = h - l
+            for r = 0 to vpRows - 1
+                float rLo = vpLo + r * step
+                float rHi = rLo + step
+                if rng > 0
+                    float ov = math.min(h, rHi) - math.max(l, rLo)
+                    if ov > 0
+                        vol.set(r, vol.get(r) + v * ov / rng)
+                else if h >= rLo and (h < rHi or r == vpRows - 1)
+                    vol.set(r, vol.get(r) + v)
+
+        float total = vol.sum()
+        float mx = vol.max()
+        int pocIdx = vol.indexof(mx)
+
+        // Value Area: kanwsso mn POC 7ta n3tiw vaPct mn total volume
+        float acc = vol.get(pocIdx)
+        int up = pocIdx
+        int dn = pocIdx
+        while acc < total * vaPct and (up < vpRows - 1 or dn > 0)
+            float nUp = up < vpRows - 1 ? vol.get(up + 1) : -1.0
+            float nDn = dn > 0 ? vol.get(dn - 1) : -1.0
+            if nUp >= nDn
+                up += 1
+                acc += nUp
+            else
+                dn -= 1
+                acc += nDn
+
+        int x0 = bar_index + 2
+        for r = 0 to vpRows - 1
+            int w = math.max(1, math.round(vol.get(r) / mx * vpWidth))
+            bool inVA = r >= dn and r <= up
+            vpBoxes.push(box.new(x0, vpLo + (r + 1) * step, x0 + w, vpLo + r * step, border_color=na, bgcolor=inVA ? colVA : colOut))
+
+        float pocP = vpLo + (pocIdx + 0.5) * step
+        float vahP = vpLo + (up + 1) * step
+        float valP = vpLo + dn * step
+        int xL = bar_index - math.min(vpBars, bar_index + 1) + 1
+        int xR = x0 + vpWidth
+        vpLines.push(line.new(xL, pocP, xR, pocP, color=colPOC, width=2))
+        vpLines.push(line.new(xL, vahP, xR, vahP, color=color.new(color.blue, 20), style=line.style_dashed))
+        vpLines.push(line.new(xL, valP, xR, valP, color=color.new(color.blue, 20), style=line.style_dashed))
+        vpLabels.push(label.new(xR, pocP, "POC", style=label.style_none, textcolor=colPOC, size=size.small))
+        vpLabels.push(label.new(xR, vahP, "VAH", style=label.style_none, textcolor=color.aqua, size=size.small))
+        vpLabels.push(label.new(xR, valP, "VAL", style=label.style_none, textcolor=color.aqua, size=size.small))
+
+// =====================================================================
+//  2) CVD DIVERGENCE
+// =====================================================================
+var array<label> divLabels = array.new<label>()
+float phP = ta.pivothigh(high, cvdPiv, cvdPiv)
+float plP = ta.pivotlow(low, cvdPiv, cvdPiv)
+var float lastPHp = na
+var float lastPHc = na
+var float lastPLp = na
+var float lastPLc = na
+bool bearDiv = false
+bool bullDiv = false
+
+if not na(phP)
+    if enCVD and not na(lastPHp) and phP > lastPHp and cvd[cvdPiv] < lastPHc
+        bearDiv := true
+        divLabels.push(label.new(bar_index - cvdPiv, phP, "Bear Div", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.tiny))
+        if divLabels.size() > 50
+            label.delete(divLabels.shift())
+    lastPHp := phP
+    lastPHc := cvd[cvdPiv]
+
+if not na(plP)
+    if enCVD and not na(lastPLp) and plP < lastPLp and cvd[cvdPiv] > lastPLc
+        bullDiv := true
+        divLabels.push(label.new(bar_index - cvdPiv, plP, "Bull Div", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.tiny))
+        if divLabels.size() > 50
+            label.delete(divLabels.shift())
+    lastPLp := plP
+    lastPLc := cvd[cvdPiv]
+
+// =====================================================================
+//  3) ORDER FLOW PULSE
+// =====================================================================
+float relDelta = avgVol > 0 ? delta / avgVol : 0.0
+float hhB = ta.highest(high, brkLen)[1]
+float llB = ta.lowest(low, brkLen)[1]
+bool pulseBuyBrk  = enPulse and barstate.isconfirmed and relDelta >= pulseThr  and close > hhB
+bool pulseSellBrk = enPulse and barstate.isconfirmed and relDelta <= -pulseThr and close < llB
+bool trapBuyers   = enPulse and barstate.isconfirmed and relDelta >= pulseThr  and close < open and not pulseBuyBrk
+bool trapSellers  = enPulse and barstate.isconfirmed and relDelta <= -pulseThr and close > open and not pulseSellBrk
+
+plotshape(pulseBuyBrk,  "Pulse Breakout Buy",  shape.triangleup,   location.belowbar, color.lime,   size=size.tiny, text="Brk")
+plotshape(pulseSellBrk, "Pulse Breakout Sell", shape.triangledown, location.abovebar, color.red,    size=size.tiny, text="Brk")
+plotshape(trapBuyers,   "Trapped Buyers",      shape.xcross,       location.abovebar, color.orange, size=size.tiny, text="Trap")
+plotshape(trapSellers,  "Trapped Sellers",     shape.xcross,       location.belowbar, color.orange, size=size.tiny, text="Trap")
+
+// =====================================================================
+//  4) VOLUME IMBALANCE ZONES
+// =====================================================================
+var array<box> impBoxes = array.new<box>()
+var array<int> impDir   = array.new<int>()
+
+if enImb and impBoxes.size() > 0
+    for k = impBoxes.size() - 1 to 0
+        box b = impBoxes.get(k)
+        int d = impDir.get(k)
+        box.set_right(b, bar_index)
+        bool mit = d == 1 ? close < box.get_bottom(b) : close > box.get_top(b)
+        if mit
+            box.delete(b)
+            impBoxes.remove(k)
+            impDir.remove(k)
+
+bool buyImb  = buyV > 0 and buyV >= imbRatio * sellV and volume >= avgVol
+bool sellImb = sellV > 0 and sellV >= imbRatio * buyV and volume >= avgVol
+
+if enImb and barstate.isconfirmed
+    if buyImb
+        impBoxes.push(box.new(bar_index, open, bar_index + 1, low, border_color=na, bgcolor=colImbB))
+        impDir.push(1)
+    else if sellImb
+        impBoxes.push(box.new(bar_index, high, bar_index + 1, open, border_color=na, bgcolor=colImbS))
+        impDir.push(-1)
+    if impBoxes.size() > imbMax
+        box.delete(impBoxes.shift())
+        impDir.shift()
+
+// =====================================================================
+//  5) LIQUIDITY WALLS~  (DOM proxy)
+// =====================================================================
+float wPH = ta.pivothigh(high, wallLen, wallLen)
+float wPL = ta.pivotlow(low, wallLen, wallLen)
+float avgV50 = ta.sma(volume, 50)
+
+var array<line> wallLines = array.new<line>()
+var array<int>  wallDir   = array.new<int>()
+
+if enWall and wallLines.size() > 0
+    for k = wallLines.size() - 1 to 0
+        line ln = wallLines.get(k)
+        int d = wallDir.get(k)
+        float y = line.get_y1(ln)
+        line.set_x2(ln, bar_index)
+        bool broken = d == -1 ? close > y : close < y
+        if broken
+            line.delete(ln)
+            wallLines.remove(k)
+            wallDir.remove(k)
+
+if enWall and barstate.isconfirmed
+    if not na(wPH) and volume[wallLen] > wallMult * avgV50[wallLen]
+        wallLines.push(line.new(bar_index - wallLen, wPH, bar_index, wPH, color=color.new(color.red, 10), width=3, style=line.style_dashed))
+        wallDir.push(-1)
+    if not na(wPL) and volume[wallLen] > wallMult * avgV50[wallLen]
+        wallLines.push(line.new(bar_index - wallLen, wPL, bar_index, wPL, color=color.new(color.green, 10), width=3, style=line.style_dashed))
+        wallDir.push(1)
+    if wallLines.size() > wallMax
+        line.delete(wallLines.shift())
+        wallDir.shift()
+
+// =====================================================================
+//  6) TIME & SALES  (Block trades proxy)
+// =====================================================================
+bool isBlock = enTS and volume > tsMult * avgV50
+plotshape(isBlock and delta >= 0, "Block Buy",  shape.diamond, location.belowbar, color.aqua,    size=size.tiny)
+plotshape(isBlock and delta <  0, "Block Sell", shape.diamond, location.abovebar, color.fuchsia, size=size.tiny)
+
+var array<int>   tsTime  = array.new<int>()
+var array<float> tsVol   = array.new<float>()
+var array<float> tsDelta = array.new<float>()
+var array<float> tsPrice = array.new<float>()
+var table tsTbl = na
+
+if isBlock and barstate.isconfirmed
+    tsTime.unshift(time)
+    tsVol.unshift(volume)
+    tsDelta.unshift(delta)
+    tsPrice.unshift(close)
+    if tsTime.size() > 8
+        tsTime.pop()
+        tsVol.pop()
+        tsDelta.pop()
+        tsPrice.pop()
+
+if enTS and barstate.islast
+    if na(tsTbl)
+        tsTbl := table.new(posMap(tsPosS), 4, 10, bgcolor=color.new(color.black, 25), border_width=1, border_color=color.gray)
+    table.cell(tsTbl, 0, 0, "Time",  text_color=color.white, text_size=size.small)
+    table.cell(tsTbl, 1, 0, "Side",  text_color=color.white, text_size=size.small)
+    table.cell(tsTbl, 2, 0, "Vol",   text_color=color.white, text_size=size.small)
+    table.cell(tsTbl, 3, 0, "Price", text_color=color.white, text_size=size.small)
+    for i = 0 to 7
+        if i < tsTime.size()
+            bool isBuy = tsDelta.get(i) >= 0
+            color c = isBuy ? color.lime : color.red
+            table.cell(tsTbl, 0, i + 1, str.format_time(tsTime.get(i), "dd/MM HH:mm", syminfo.timezone), text_color=color.white, text_size=size.small)
+            table.cell(tsTbl, 1, i + 1, isBuy ? "BUY" : "SELL", text_color=c, text_size=size.small)
+            table.cell(tsTbl, 2, i + 1, str.tostring(tsVol.get(i), format.volume), text_color=c, text_size=size.small)
+            table.cell(tsTbl, 3, i + 1, str.tostring(tsPrice.get(i), format.mintick), text_color=color.white, text_size=size.small)
+        else
+            table.cell(tsTbl, 0, i + 1, "", text_size=size.small)
+            table.cell(tsTbl, 1, i + 1, "", text_size=size.small)
+            table.cell(tsTbl, 2, i + 1, "", text_size=size.small)
+            table.cell(tsTbl, 3, i + 1, "", text_size=size.small)
+    table.cell(tsTbl, 0, 9, "CVD", text_color=color.yellow, text_size=size.small)
+    table.cell(tsTbl, 1, 9, enCVD ? str.tostring(cvd, format.volume) : "off", text_color=cvd >= 0 ? color.lime : color.red, text_size=size.small)
+    table.cell(tsTbl, 2, 9, "Delta", text_color=color.yellow, text_size=size.small)
+    table.cell(tsTbl, 3, 9, str.tostring(delta, format.volume), text_color=delta >= 0 ? color.lime : color.red, text_size=size.small)
+
+if not enTS and not na(tsTbl)
+    table.delete(tsTbl)
+    tsTbl := na
+
+// =====================================================================
+//  ALERTS
+// =====================================================================
+alertcondition(pulseBuyBrk,  "Pulse: Breakout Buy",  "Order Flow Pulse: aggressive BUY breakout")
+alertcondition(pulseSellBrk, "Pulse: Breakout Sell", "Order Flow Pulse: aggressive SELL breakout")
+alertcondition(trapBuyers,   "Pulse: Trapped Buyers",  "Order Flow Pulse: Trapped Buyers")
+alertcondition(trapSellers,  "Pulse: Trapped Sellers", "Order Flow Pulse: Trapped Sellers")
+alertcondition(bearDiv,      "CVD: Bearish Divergence", "CVD Bearish Divergence")
+alertcondition(bullDiv,      "CVD: Bullish Divergence", "CVD Bullish Divergence")
+alertcondition(isBlock and delta >= 0, "Block Buy",  "Block trade BUY")
+alertcondition(isBlock and delta <  0, "Block Sell", "Block trade SELL")
+
+// =====================================================================
+//  7) WEBHOOK ALERTS (alert() dynamic JSON -> Telegram relay)
+//  F TradingView: Create Alert -> Condition: "Order Flow Suite" -> "Any alert() function call"
+// =====================================================================
+g7 = "7) Webhook alerts"
+enWH   = input.bool(false, "Send alert() JSON on signals", group=g7)
+tgChat = input.string("", "Telegram chat_id", group=g7, tooltip="Ma tktbch token hna. Token kaykon ghir f webhook URL dyal alert.")
+
+f_msg(string sig) =>
+    '{"chat_id":"' + tgChat + '","text":"' + sig + ' | ' + syminfo.ticker + ' ' + timeframe.period + ' @ ' + str.tostring(close, format.mintick) + '"}'
+
+if enWH and barstate.isconfirmed
+    if pulseBuyBrk
+        alert(f_msg("Pulse BUY breakout"), alert.freq_once_per_bar_close)
+    if pulseSellBrk
+        alert(f_msg("Pulse SELL breakout"), alert.freq_once_per_bar_close)
+    if trapBuyers
+        alert(f_msg("Trapped Buyers"), alert.freq_once_per_bar_close)
+    if trapSellers
+        alert(f_msg("Trapped Sellers"), alert.freq_once_per_bar_close)
+    if bearDiv
+        alert(f_msg("CVD Bearish Divergence"), alert.freq_once_per_bar_close)
+    if bullDiv
+        alert(f_msg("CVD Bullish Divergence"), alert.freq_once_per_bar_close)
+    if isBlock and delta >= 0
+        alert(f_msg("Block BUY"), alert.freq_once_per_bar_close)
+    if isBlock and delta < 0
+        alert(f_msg("Block SELL"), alert.freq_once_per_bar_close)
+
+// =====================================================================
+//  8) SESSION VOLUME PROFILE  (Phase 1, v2)
+//
+//  HONEST NOTES
+//   * Volume-by-price = each candle's volume spread EQUALLY over its High-Low range.
+//     ESTIMATE only. NOT a footprint, NOT a per-trade profile.
+//   * CFD/Forex volume = tick volume.
+//   * Finished profiles are built/drawn ONLY on confirmed bars -> no repaint.
+//     Only the live profile + Developing POC move while a session runs.
+//   * Session membership is decided by the chart bar's OPEN time, so a candle that
+//     crosses a session boundary is counted whole in one session. Use a timeframe that
+//     divides your boundaries (5m/15m/30m/1h). A warning shows above 1h.
+//   * Rows = price bins of fixed size (reference range / rows), set when the profile starts.
+//     Developing POC and final POC use the SAME bins, so they match exactly.
+//   * Bins grow dynamically (no edge pile-up). Only a move > 4000 bins is clipped and flagged.
+//   * First profile of the loaded history may start mid-way: marked with "*".
+// =====================================================================
+const int SV_NB0   = 64
+const int SV_NBH0  = 32
+const int SV_NBMAX = 4000
+
+type Prof
+    int startBar
+    int endBar
+    float hi
+    float lo
+    float binSz
+    float base
+    array<float> bins
+    int pocIdx
+    float pocVol
+    int iLo
+    int iHi
+    int vaLoR
+    int vaHiR
+    float poc
+    float vah
+    float val
+    bool partial
+    bool clipped
+    polyline polyAll
+    polyline polyVA
+    line lnPoc
+    line lnVah
+    line lnVal
+
+type Slot
+    string name
+    bool enabled
+    int maxStored
+    color col
+    bool showDev
+    bool showLev
+    Prof act
+    Prof live
+    array<Prof> hist
+
+gS0 = "8) Session VP - General"
+svOn       = input.bool(true, "Enable Session Volume Profile module", group=gS0)
+svTz       = input.string("UTC", "Timezone (sessions, day, week)", group=gS0, tooltip="IANA name, e.g. UTC, Africa/Casablanca, America/New_York. Session times below are read in this timezone. Day and week boundaries follow it too (week starts Sunday).")
+svRows     = input.int(40, "Rows per reference range (30-50 = typical profile)", minval=10, maxval=100, group=gS0, tooltip="Bin size = reference range / rows. Reference = previous daily ATR (Daily), previous weekly ATR (Weekly), daily ATR x factor below (sessions). A profile wider/narrower than the reference gets more/fewer rows.")
+svVaFrac   = input.float(70.0, "Value Area %", minval=50.0, maxval=95.0, step=1.0, group=gS0) / 100.0
+svWidthFrac = input.float(20.0, "Histogram width (% of profile time span)", minval=5.0, maxval=100.0, step=5.0, group=gS0) / 100.0
+svExt      = input.int(10, "Extend levels into the future (bars)", minval=0, maxval=200, group=gS0)
+svSessFactor = input.float(0.6, "Session reference range = daily ATR x", minval=0.1, maxval=3.0, step=0.1, group=gS0, tooltip="Only sets the row size of session profiles (resolution).")
+svLabels   = input.bool(false, "Level labels (live + latest previous only)", group=gS0)
+svNote     = input.bool(true, "Show limitations note", group=gS0)
+svOnly     = input.string("Daily only", "Show only", options=["All enabled", "Daily only", "Weekly only", "Asian only", "London only", "NY only"], group=gS0, tooltip="Quick declutter. Pick ONE profile type, or All enabled to use the per-type toggles below.")
+svVaLines  = input.bool(false, "Show VAH / VAL lines (off = POC line only)", group=gS0, tooltip="The Value Area is still shaded in the histogram; this only adds the dashed VAH/VAL lines.")
+
+gSD = "8a) Daily VP"
+dOn  = input.bool(true, "Enable Daily VP", group=gSD)
+dMax = input.int(2, "Stored profiles", minval=1, maxval=8, group=gSD)
+dLev = input.bool(true, "POC / VAH / VAL lines (previous extended)", group=gSD)
+dDev = input.bool(true, "Developing POC line", group=gSD)
+dCol = input.color(#2962FF, "Color", group=gSD)
+
+gSW = "8b) Weekly VP"
+wOn  = input.bool(false, "Enable Weekly VP", group=gSW)
+wMax = input.int(2, "Stored profiles", minval=1, maxval=8, group=gSW)
+wLev = input.bool(true, "POC / VAH / VAL lines (previous extended)", group=gSW)
+wDev = input.bool(true, "Developing POC line", group=gSW)
+wCol = input.color(#E91E63, "Color", group=gSW)
+
+gSA = "8c) Asian session"
+aOn   = input.bool(true, "Enable Asian VP", group=gSA)
+aSess = input.session("0000-0800", "Session (in timezone above)", group=gSA)
+aMax  = input.int(1, "Stored profiles", minval=1, maxval=8, group=gSA)
+aLev  = input.bool(true, "POC / VAH / VAL lines (previous extended)", group=gSA)
+aDev  = input.bool(true, "Developing POC line", group=gSA)
+aCol  = input.color(#FF9800, "Color", group=gSA)
+
+gSL = "8d) London session"
+lOn   = input.bool(true, "Enable London VP", group=gSL)
+lSess = input.session("0800-1600", "Session (in timezone above)", group=gSL)
+lMax  = input.int(1, "Stored profiles", minval=1, maxval=8, group=gSL)
+lLev  = input.bool(true, "POC / VAH / VAL lines (previous extended)", group=gSL)
+lDev  = input.bool(true, "Developing POC line", group=gSL)
+lCol  = input.color(#9C27B0, "Color", group=gSL)
+
+gSN = "8e) New York session"
+nOn   = input.bool(true, "Enable New York VP", group=gSN)
+nSess = input.session("1300-2100", "Session (in timezone above)", group=gSN)
+nMax  = input.int(1, "Stored profiles", minval=1, maxval=8, group=gSN)
+nLev  = input.bool(true, "POC / VAH / VAL lines (previous extended)", group=gSN)
+nDev  = input.bool(true, "Developing POC line", group=gSN)
+nCol  = input.color(#00BFA5, "Color", group=gSN)
+
+// ---------------------------------------------------------------- profile engine
+method addBar(Prof p, float h, float l, float v) =>
+    p.hi := math.max(p.hi, h)
+    p.lo := math.min(p.lo, l)
+    int r0 = int(math.floor((l - p.base) / p.binSz))
+    int r1 = int(math.floor((h - p.base) / p.binSz))
+    if r0 < 0
+        int need = math.min(-r0, SV_NBMAX - p.bins.size())
+        int c = 0
+        while c < need
+            p.bins.unshift(0.0)
+            c += 1
+        p.base := p.base - need * p.binSz
+        p.pocIdx := p.pocIdx + need
+        r0 := r0 + need
+        r1 := r1 + need
+    int sz = p.bins.size()
+    if r1 > sz - 1
+        int need2 = math.min(r1 - sz + 1, SV_NBMAX - sz)
+        int c2 = 0
+        while c2 < need2
+            p.bins.push(0.0)
+            c2 += 1
+    sz := p.bins.size()
+    if r0 < 0 or r1 > sz - 1
+        p.clipped := true
+    float share = v / (r1 - r0 + 1)
+    bool outAll = r1 < 0 or r0 > sz - 1
+    r0 := math.max(0, math.min(sz - 1, r0))
+    r1 := math.max(0, math.min(sz - 1, r1))
+    if not outAll
+        for k = r0 to r1
+            float nv = p.bins.get(k) + share
+            p.bins.set(k, nv)
+            if nv > p.pocVol
+                p.pocVol := nv
+                p.pocIdx := k
+    true
+
+method calc(Prof p, float vaP) =>
+    int sz = p.bins.size()
+    int iLo = -1
+    int iHi = -1
+    for k = 0 to sz - 1
+        if p.bins.get(k) > 0
+            if iLo < 0
+                iLo := k
+            iHi := k
+    bool ok = iLo >= 0 and p.pocVol > 0
+    p.iLo := ok ? iLo : 0
+    p.iHi := ok ? iHi : 0
+    float target = p.bins.sum() * vaP
+    int pr = p.pocIdx
+    int vlo = pr
+    int vhi = pr
+    float acc = ok ? p.bins.get(pr) : 0.0
+    while ok and acc < target and (vlo > p.iLo or vhi < p.iHi)
+        float vUp = vhi < p.iHi ? p.bins.get(vhi + 1) : -1.0
+        float vDn = vlo > p.iLo ? p.bins.get(vlo - 1) : -1.0
+        if vUp >= vDn
+            vhi := vhi + 1
+            acc := acc + vUp
+        else
+            vlo := vlo - 1
+            acc := acc + vDn
+    p.vaLoR := vlo
+    p.vaHiR := vhi
+    p.poc := ok ? p.base + (pr + 0.5) * p.binSz : na
+    p.vah := ok ? p.base + (vhi + 1) * p.binSz : na
+    p.val := ok ? p.base + vlo * p.binSz : na
+    true
+
+newProf(float ref) =>
+    float bs = math.max(syminfo.mintick, ref / svRows)
+    Prof.new(startBar = bar_index, hi = high, lo = low, binSz = bs, base = open - SV_NBH0 * bs, bins = array.new_float(SV_NB0, 0.0), pocIdx = SV_NBH0, pocVol = 0.0)
+
+cloneProf(Prof p) =>
+    Prof.new(startBar = p.startBar, hi = p.hi, lo = p.lo, binSz = p.binSz, base = p.base, bins = array.copy(p.bins), pocIdx = p.pocIdx, pocVol = p.pocVol, partial = p.partial, clipped = p.clipped)
+
+devPx(Prof p) =>
+    p.base + (p.pocIdx + 0.5) * p.binSz
+
+delProf(Prof p) =>
+    if not na(p)
+        if not na(p.polyAll)
+            polyline.delete(p.polyAll)
+        if not na(p.polyVA)
+            polyline.delete(p.polyVA)
+        if not na(p.lnPoc)
+            line.delete(p.lnPoc)
+        if not na(p.lnVah)
+            line.delete(p.lnVah)
+        if not na(p.lnVal)
+            line.delete(p.lnVal)
+    true
+
+drawProf(Prof p, color col, bool levels, int xEnd, int xLine2) =>
+    p.calc(svVaFrac)
+    if p.pocVol > 0
+        float maxV = p.pocVol
+        float bs = p.binSz
+        int x0 = p.startBar
+        float w = math.max(3.0, (xEnd - x0 + 1) * svWidthFrac)
+
+        array<chart.point> ptsAll = array.new<chart.point>()
+        ptsAll.push(chart.point.from_index(x0, p.base + p.iLo * bs))
+        for r = p.iLo to p.iHi
+            int xr = x0 + int(math.round(p.bins.get(r) / maxV * w))
+            float y0 = p.base + r * bs
+            ptsAll.push(chart.point.from_index(xr, y0))
+            ptsAll.push(chart.point.from_index(xr, y0 + bs))
+        ptsAll.push(chart.point.from_index(x0, p.base + (p.iHi + 1) * bs))
+        p.polyAll := polyline.new(ptsAll, curved = false, closed = true, xloc = xloc.bar_index, line_color = color.new(col, 60), fill_color = color.new(col, 88), line_width = 1)
+
+        array<chart.point> ptsVA = array.new<chart.point>()
+        ptsVA.push(chart.point.from_index(x0, p.base + p.vaLoR * bs))
+        for r = p.vaLoR to p.vaHiR
+            int xr = x0 + int(math.round(p.bins.get(r) / maxV * w))
+            float y0 = p.base + r * bs
+            ptsVA.push(chart.point.from_index(xr, y0))
+            ptsVA.push(chart.point.from_index(xr, y0 + bs))
+        ptsVA.push(chart.point.from_index(x0, p.base + (p.vaHiR + 1) * bs))
+        p.polyVA := polyline.new(ptsVA, curved = false, closed = true, xloc = xloc.bar_index, line_color = color.new(col, 30), fill_color = color.new(col, 68), line_width = 1)
+
+        if levels
+            p.lnPoc := line.new(x0, p.poc, xLine2, p.poc, color = col, width = 2)
+            if svVaLines
+                p.lnVah := line.new(x0, p.vah, xLine2, p.vah, color = color.new(col, 25), width = 1, style = line.style_dashed)
+                p.lnVal := line.new(x0, p.val, xLine2, p.val, color = color.new(col, 25), width = 1, style = line.style_dashed)
+    true
+
+finalizeSlot(Slot s, int endBar) =>
+    Prof p = s.act
+    p.endBar := endBar
+    drawProf(p, s.col, s.showLev, endBar, endBar)
+    if s.showLev and s.hist.size() > 0
+        Prof q = s.hist.last()
+        if not na(q.lnPoc)
+            line.set_x2(q.lnPoc, endBar)
+        if not na(q.lnVah)
+            line.set_x2(q.lnVah, endBar)
+        if not na(q.lnVal)
+            line.set_x2(q.lnVal, endBar)
+    s.hist.push(p)
+    while s.hist.size() > s.maxStored
+        Prof o = s.hist.shift()
+        delProf(o)
+    s.act := na
+    true
+
+addLbl(array<label> arr, string txt, float price, color col) =>
+    if not na(price)
+        arr.push(label.new(bar_index + svExt, price, txt, style = label.style_label_left, color = color.new(col, 100), textcolor = col, size = size.small))
+    true
+
+// ---------------------------------------------------------------- session / day / week detection
+inA = not na(time(timeframe.period, aSess, svTz))
+inL = not na(time(timeframe.period, lSess, svTz))
+inN = not na(time(timeframe.period, nSess, svTz))
+dayChg  = ta.change(dayofmonth(time, svTz)) != 0
+weekChg = ta.change(weekofyear(time, svTz)) != 0
+canRun  = timeframe.isintraday
+tfWarn  = timeframe.in_seconds() > 3600
+
+// reference ranges: previous COMPLETED daily/weekly ATR (no future leakage), used only to size the bins
+dAtr = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead = barmerge.lookahead_on)
+wAtr = request.security(syminfo.tickerid, "W", ta.atr(14)[1], lookahead = barmerge.lookahead_on)
+float refD = nz(dAtr, close * 0.01)
+float refW = nz(wAtr, close * 0.03)
+float refS = refD * svSessFactor
+
+var array<Slot> slots = array.new<Slot>()
+var array<label> svLabs = array.new<label>()
+var bool anyClip = false
+if barstate.isfirst
+    slots.push(Slot.new(name = "Daily",  enabled = dOn and (svOnly == "All enabled" or svOnly == "Daily only"), maxStored = dMax, col = dCol, showDev = dDev, showLev = dLev, hist = array.new<Prof>()))
+    slots.push(Slot.new(name = "Weekly", enabled = wOn and (svOnly == "All enabled" or svOnly == "Weekly only"), maxStored = wMax, col = wCol, showDev = wDev, showLev = wLev, hist = array.new<Prof>()))
+    slots.push(Slot.new(name = "Asian",  enabled = aOn and (svOnly == "All enabled" or svOnly == "Asian only"), maxStored = aMax, col = aCol, showDev = aDev, showLev = aLev, hist = array.new<Prof>()))
+    slots.push(Slot.new(name = "London", enabled = lOn and (svOnly == "All enabled" or svOnly == "London only"), maxStored = lMax, col = lCol, showDev = lDev, showLev = lLev, hist = array.new<Prof>()))
+    slots.push(Slot.new(name = "NY",     enabled = nOn and (svOnly == "All enabled" or svOnly == "NY only"), maxStored = nMax, col = nCol, showDev = nDev, showLev = nLev, hist = array.new<Prof>()))
+
+array<bool> inArr = array.from(true, true, inA, inL, inN)
+array<bool> stArr = array.from(dayChg, weekChg, inA and not inA[1], inL and not inL[1], inN and not inN[1])
+array<bool> enArr = array.from(dayChg, weekChg, not inA and inA[1], not inL and inL[1], not inN and inN[1])
+array<float> refArr = array.from(refD, refW, refS, refS, refS)
+array<float> devVals = array.new_float(5, na)
+
+if barstate.islast
+    for lb in svLabs
+        label.delete(lb)
+    svLabs.clear()
+
+if svOn and canRun
+    for i = 0 to 4
+        Slot s = slots.get(i)
+        if s.enabled
+            bool inside = inArr.get(i)
+            bool stEv = stArr.get(i)
+            bool enEv = enArr.get(i)
+            float rf = refArr.get(i)
+
+            // ---- state changes ONLY on confirmed bars (finished profiles never repaint)
+            if barstate.isconfirmed
+                if (stEv or enEv) and not na(s.act)
+                    Prof fin = s.act
+                    if fin.clipped
+                        anyClip := true
+                    finalizeSlot(s, bar_index - 1)
+                if inside and na(s.act)
+                    Prof np = newProf(rf)
+                    np.partial := not stEv
+                    s.act := np
+                if inside and not na(s.act)
+                    Prof a = s.act
+                    a.addBar(high, low, nz(volume))
+                    if s.showDev and a.pocVol > 0
+                        devVals.set(i, devPx(a))
+
+            // ---- live view + level extension (last bar only; works on clones, never on stored state)
+            if barstate.islast
+                delProf(s.live)
+                s.live := na
+                Prof lp = na
+                if barstate.isconfirmed
+                    if not na(s.act)
+                        lp := cloneProf(s.act)
+                else
+                    if inside and (stEv or na(s.act))
+                        lp := newProf(rf)
+                        lp.partial := not stEv
+                        lp.addBar(high, low, nz(volume))
+                    else if not na(s.act)
+                        lp := cloneProf(s.act)
+                        if inside
+                            lp.addBar(high, low, nz(volume))
+                if not na(lp)
+                    if lp.clipped
+                        anyClip := true
+                    drawProf(lp, s.col, s.showLev, bar_index, bar_index + svExt)
+                    s.live := lp
+                    if inside and s.showDev and lp.pocVol > 0
+                        devVals.set(i, devPx(lp))
+                    if svLabels and s.showLev
+                        string nm = s.name + (lp.partial ? "*" : "")
+                        addLbl(svLabs, nm + " POC (live)", lp.poc, s.col)
+                        if svVaLines
+                            addLbl(svLabs, nm + " VAH (live)", lp.vah, s.col)
+                            addLbl(svLabs, nm + " VAL (live)", lp.val, s.col)
+                if s.hist.size() > 0 and s.showLev
+                    Prof q = s.hist.last()
+                    if not na(q.lnPoc)
+                        line.set_x2(q.lnPoc, bar_index + svExt)
+                    if not na(q.lnVah)
+                        line.set_x2(q.lnVah, bar_index + svExt)
+                    if not na(q.lnVal)
+                        line.set_x2(q.lnVal, bar_index + svExt)
+                    if svLabels
+                        string pn = "p" + s.name + (q.partial ? "*" : "")
+                        addLbl(svLabs, pn + " POC", q.poc, s.col)
+                        if svVaLines
+                            addLbl(svLabs, pn + " VAH", q.vah, s.col)
+                            addLbl(svLabs, pn + " VAL", q.val, s.col)
+
+// ---------------------------------------------------------------- developing POC lines
+plot(devVals.get(0), "Developing POC - Daily",  color=dCol, style=plot.style_linebr, linewidth=1)
+plot(devVals.get(1), "Developing POC - Weekly", color=wCol, style=plot.style_linebr, linewidth=1)
+plot(devVals.get(2), "Developing POC - Asian",  color=aCol, style=plot.style_linebr, linewidth=1)
+plot(devVals.get(3), "Developing POC - London", color=lCol, style=plot.style_linebr, linewidth=1)
+plot(devVals.get(4), "Developing POC - NY",     color=nCol, style=plot.style_linebr, linewidth=1)
+
+// ---------------------------------------------------------------- limitations / warnings
+svVolSum = ta.cum(nz(volume))
+var table svNoteT = table.new(position.bottom_right, 1, 1, bgcolor=color.new(color.black, 85))
+if svOn and barstate.islast
+    string t = svNote ? "Session VP = candle volume spread over High-Low (estimate, NOT footprint). CFD volume = tick volume. * = profile started mid-way (chart start)." : ""
+    if not canRun
+        t := t + "\nSession VP needs an INTRADAY timeframe."
+    if svVolSum == 0
+        t := t + "\nNo volume data on this symbol/feed."
+    if tfWarn
+        t := t + "\nTimeframe > 1h: session boundaries are bar-open based, expect coarse sessions."
+    if anyClip
+        t := t + "\nA profile moved > 4000 bins and was clipped at the edge."
+    table.cell(svNoteT, 0, 0, t, text_color=color.gray, text_size=size.tiny)
