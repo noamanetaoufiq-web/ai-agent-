@@ -37,3 +37,10 @@ Prices refresh in the browser every 60 s (Yahoo direct, public CORS proxy as fal
 - `fetch_data.py` adds, per market: RSI14, SMA20/50, ATR14, 30-day high/low, and an **order-flow estimate** ported from `tradingview/Order_Flow_Suite_v2_1_SessionVP.pine` (15m bars from 1m candles: delta, CVD and divergences, Pulse breakouts/traps, imbalance zones, liquidity walls, block trades, Volume Profile POC/VAH/VAL, Daily/Asian/London/NY session profiles).
 - It is a **proxy**: an up-close candle counts as buy volume. It is not a footprint or DOM. Yahoo gives no volume for EUR/USD, so that market has no order flow. Yahoo keeps only about 5-7 days of 1m data.
 - The Pine script is included for TradingView; it needs a plan that allows lower-timeframe data.
+
+## Setups, confirmation and win rate
+- **BTC**: Binance klines give REAL taker (aggressor) volume, so delta and CVD are real. Needs `data-api.binance.vision` to be reachable from GitHub Actions; if not, it falls back to Yahoo and `real_delta` becomes false.
+- **Gold (GC) and Nasdaq (NQ) futures**: Yahoo candles, about 10-15 min late (`age_min` shows it). Delta is an estimate. Real CME aggressor data needs a paid feed (e.g. Databento).
+- **5m bars** for signals, **1m** only for confirmation (`m1`).
+- **Win rate = backtest, never a guess.** `backtest.py` (workflow "Daily backtest": run it once by hand) replays every signal: BTC about 365 days of Binance 5m (real delta), Gold GC / Nasdaq NQ / others about 60 days of Yahoo 5m (Yahoo's limit for 5m). It writes `backtest.json` (stop 1 ATR, target 2 ATR, max 2 h, no fees). Every 15 min `fetch_data.py` attaches to each ACTIVE signal the stats of the same signal + session + with/against the daily trend (`of.match`). "positive" is weak evidence: random data produces some by chance.
+- Mode **Setup validator** scores a setup with a 5-check scorecard. After updating, the system prompt is replaced once by the new preset.
