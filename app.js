@@ -293,7 +293,10 @@ async function send() {
   input.value = ''; input.style.height = 'auto'; state.files = []; renderFiles();
   const aiView = { role: 'ai', text: '' }; state.view.push(aiView); saveCurrent();   // the question is on disk before the request starts
   let system = $('#systemPrompt').value.trim();
-  if ($('#accData').checked && state.data) system += '\n\nLive market data (from data.json):\n' + dataDigest();
+  if ($('#accData').checked && state.data) {
+    await Promise.race([refreshLive(true), new Promise(r => setTimeout(r, 8000))]);   // fresh prices + order flow at the moment you send
+    system += '\n\nLive market data:\n' + dataDigest();
+  }
   const ai = addMsg('ai', '…'); let out = '', pending = false, finalText = '';
   const t0 = performance.now(); let tFirst = 0;
   state.abort = new AbortController(); setBusy(true);
@@ -358,7 +361,7 @@ $('#prompt').addEventListener('paste', e => { const fs = [...(e.clipboardData?.f
 const acc = load('aicc.access', { data: false, search: false });
 $('#accData').checked = !!acc.data; $('#accSearch').checked = !!acc.search;
 $('#accessWrap').addEventListener('change', () => save('aicc.access', { data: $('#accData').checked, search: $('#accSearch').checked }));
-const dataDigest = () => JSON.stringify((state.data.markets || []).map(m => ({ name: m.name, symbol: m.symbol, price: m.price, change_pct: m.change_pct, last7: m.history.slice(-7).map(h => h.c), ind: m.indicators || undefined, of: m.orderflow || undefined })));
+const dataDigest = () => JSON.stringify({ meta: { now: new Date().toISOString(), data_json_updated: state.data.updated || null, browser_refresh: state.liveAt ? new Date(state.liveAt).toISOString() : null, backtest_generated: state.bt ? state.bt.generated : 'MISSING' }, markets: (state.data.markets || []).map(m => ({ name: m.name, symbol: m.symbol, price: m.price, change_pct: m.change_pct, last7: m.history.slice(-7).map(h => h.c), ind: m.indicators || undefined, of: m.orderflow || undefined })) });
 
 const dz = $('#chatPanel');
 ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('over'); }));
@@ -396,6 +399,7 @@ async function loadData() {
   try { $('#jsonView').textContent = JSON.stringify(d, null, 1).slice(0, 4000); } catch (e) { console.error(e); }
   if (!d.markets.some(m => m.symbol === state.symbol)) state.symbol = d.markets[0].symbol;
   [renderMetrics, renderTicker, drawChart].forEach(fn => { try { fn(); } catch (e) { console.error(fn.name, e); } });
+  await loadBacktest();
   startLive();
 }
 function renderTicker() {
@@ -428,42 +432,122 @@ function drawChart() {
   });
 }
 
-/* ---------- live prices: browser refreshes every 60 s (data.json keeps the 30-day history) ---------- */
-const LIVE_MS = 60000; let liveTimer = 0, liveBusy = false;
-async function liveQuote(sym) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=1m`;
-  for (const u of [url, 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url)]) {   // direct first, public CORS proxy as fallback
-    try {
-      const r = await fetch(u, { cache: 'no-store' }); if (!r.ok) continue;
-      const meta = (await r.json()).chart.result[0].meta;
-      const price = num(meta.regularMarketPrice), prev = num(meta.chartPreviousClose ?? meta.previousClose);
-      if (price !== null) return { price, change_pct: prev ? Math.round((price - prev) / prev * 10000) / 100 : 0 };
-    } catch { /* try next route */ }
-  }
+/* ---------- live prices + order flow: recomputed in the browser every 60 s and right before every message ---------- */
+const LIVE_MS = 60000; let liveTimer = 0, livePromise = null;
+const SIGDIR = { 'Pulse BUY breakout': 1, 'Pulse SELL breakout': -1, 'Trapped sellers': 1, 'Trapped buyers': -1, 'CVD bullish divergence': 1, 'CVD bearish divergence': -1 };
+const YF = s => `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(s)}`;
+const PROXY = u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u);   // public CORS proxy, fallback only
+async function getJSON(urls) {
+  for (const u of urls) { try { const r = await fetch(u, { cache: 'no-store' }); if (r.ok) return await r.json(); } catch { /* try next route */ } }
   return null;
 }
-async function refreshLive() {
-  if (liveBusy || document.hidden || !state.data || !state.data.markets.length) return;
-  liveBusy = true;
+async function liveQuote(sym) {
+  const u = `${YF(sym)}?range=1d&interval=1m`, j = await getJSON([u, PROXY(u)]);
   try {
-    const ms = state.data.markets, qs = await Promise.all(ms.map(m => liveQuote(m.symbol)));
-    let ok = 0;
-    ms.forEach((m, i) => {
-      const q = qs[i]; if (!q) return; ok++;
-      m.price = q.price; m.change_pct = q.change_pct;
+    const meta = j.chart.result[0].meta, price = num(meta.regularMarketPrice), prev = num(meta.chartPreviousClose ?? meta.previousClose);
+    return price === null ? null : { price, change_pct: prev ? Math.round((price - prev) / prev * 10000) / 100 : 0 };
+  } catch { return null; }
+}
+async function liveRows(sym) {   // 1-minute candles [t, o, h, l, c, volume, realBuyVolume|null]
+  if (sym === 'BTC-USD') {
+    for (const host of ['https://data-api.binance.vision', 'https://api.binance.com']) {
+      const j = await getJSON([`${host}/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1000`]);
+      if (Array.isArray(j) && j.length) return j.map(k => [Math.floor(k[0] / 1000), +k[1], +k[2], +k[3], +k[4], +k[5], +k[9]]);   // k[9] = REAL taker buy volume
+    }
+  }
+  const u = `${YF(sym)}?range=5d&interval=1m`, j = await getJSON([u, PROXY(u)]);
+  try {
+    const r = j.chart.result[0], q = r.indicators.quote[0], rows = [];
+    r.timestamp.forEach((t, i) => { if ([q.open[i], q.high[i], q.low[i], q.close[i]].every(v => v != null)) rows.push([t, q.open[i], q.high[i], q.low[i], q.close[i], q.volume[i] || 0, null]); });
+    return rows;
+  } catch { return null; }
+}
+function aggBars(rows, tf) {   // same rule as fetch_data.py: no real buy volume = up-close candle counts as buy
+  const m = new Map();
+  for (const [t, o, h, l, c, v, buy] of rows) {
+    const k = t - t % tf; let b = m.get(k);
+    if (!b) { b = { t: k, o, h, l, c, v: 0, buy: 0, sell: 0 }; m.set(k, b); }
+    b.h = Math.max(b.h, h); b.l = Math.min(b.l, l); b.c = c; b.v += v;
+    if (buy == null) { if (c >= o) b.buy += v; else b.sell += v; } else { b.buy += buy; b.sell += v - buy; }
+  }
+  const out = [...m.values()].sort((x, y) => x.t - y.t);
+  if (out.length && out[out.length - 1].t + tf > Date.now() / 1000) out.pop();   // confirmed bars only
+  return out;
+}
+const sessionOf = t => { const h = Math.floor((t % 86400) / 3600); return h < 8 ? 'asian' : h < 13 ? 'london' : h < 21 ? 'ny' : 'late'; };
+function detectSigs(bars) {
+  const n = bars.length, out = [], L = 5, cv = [], avg = []; let cvd = 0;
+  bars.forEach((b, i) => { b.d = b.buy - b.sell; cvd += b.d; cv.push(cvd); const w = bars.slice(Math.max(0, i - 19), i + 1); avg.push(w.reduce((s, x) => s + x.v, 0) / w.length); });
+  for (let i = 10; i < n; i++) {
+    const b = bars[i], rel = avg[i] ? b.d / avg[i] : 0, prev = bars.slice(i - 10, i);
+    const bb = rel >= .6 && b.c > Math.max(...prev.map(x => x.h)), sb = rel <= -.6 && b.c < Math.min(...prev.map(x => x.l));
+    if (bb) out.push([i, 'Pulse BUY breakout']);
+    if (sb) out.push([i, 'Pulse SELL breakout']);
+    if (rel >= .6 && b.c < b.o && !bb) out.push([i, 'Trapped buyers']);
+    if (rel <= -.6 && b.c > b.o && !sb) out.push([i, 'Trapped sellers']);
+  }
+  let ph = null, pc = 0, pl = null, plc = 0;
+  for (let j = L; j < n - L; j++) {
+    const w = bars.slice(j - L, j + L + 1);
+    if (bars[j].h === Math.max(...w.map(x => x.h))) { if (ph !== null && bars[j].h > ph && cv[j] < pc) out.push([j + L, 'CVD bearish divergence']); ph = bars[j].h; pc = cv[j]; }
+    if (bars[j].l === Math.min(...w.map(x => x.l))) { if (pl !== null && bars[j].l < pl && cv[j] > plc) out.push([j + L, 'CVD bullish divergence']); pl = bars[j].l; plc = cv[j]; }
+  }
+  return { sigs: out.sort((x, y) => x[0] - y[0]), cvd: cv, avg };
+}
+function atrLast(bars, n = 14) {
+  if (bars.length <= n) return null;
+  const tr = i => Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - bars[i - 1].c), Math.abs(bars[i].l - bars[i - 1].c));
+  let a = 0; for (let i = 1; i <= n; i++) a += tr(i); a /= n;
+  for (let i = n + 1; i < bars.length; i++) a = (a * (n - 1) + tr(i)) / n;
+  return a;
+}
+function computeFlow(m, rows) {
+  const bars = aggBars(rows, 300), n = bars.length;
+  if (n < 60 || !bars.some(b => b.v > 0)) return null;
+  const { sigs, cvd, avg } = detectSigs(bars), sma = m.indicators && m.indicators.sma20, st = t => new Date(t * 1000).toISOString().slice(5, 16).replace('T', ' ');
+  const signals = sigs.filter(([i]) => i >= n - 12).slice(-6).map(([i, nm]) => ({ t: st(bars[i].t), sig: nm, session: sessionOf(bars[i].t), trend: !sma ? null : ((SIGDIR[nm] === 1) === (bars[i].c > sma) ? 'with' : 'against') }));
+  const m1 = aggBars(rows, 60), sum = a => a.reduce((s, b) => s + b.buy - b.sell, 0), d5 = sum(m1.slice(-5)), last = bars[n - 1], a = atrLast(bars);
+  return { signals, delta: Math.round(last.d), rel_delta: avg[n - 1] ? Math.round(last.d / avg[n - 1] * 100) / 100 : 0, cvd: Math.round(cvd[n - 1]), cvd_chg_12: Math.round(cvd[n - 1] - cvd[n - 13]),
+    atr5: a ? Math.round(a * 1e4) / 1e4 : null, last_bar: st(last.t), real_delta: rows[rows.length - 1][6] != null, age_min: Math.round((Date.now() / 1000 - rows[rows.length - 1][0]) / 60),
+    m1: { delta_5m: Math.round(d5), delta_15m: Math.round(sum(m1.slice(-15))), dir: d5 > 0 ? 'buy' : d5 < 0 ? 'sell' : 'flat', last_close: m1[m1.length - 1].c, last_1m: st(m1[m1.length - 1].t) } };
+}
+function matchStats(sym, signals) {   // historical stats (backtest.json) of the signals active now; same cell rule as fetch_data.py
+  const bt = state.bt && state.bt.markets && state.bt.markets[sym]; if (!bt) return null;
+  const stats = signals.map(e => {
+    const key = `${e.sig}|${e.session}|${e.trend}`; let row = bt.rows[key], cell = key;
+    if (!row || row.n < 30) { row = bt.overall[e.sig]; cell = 'all conditions'; }
+    return row ? { sig: e.sig, t: e.t, cell, ...row } : null;
+  }).filter(Boolean);
+  return { basis: bt.basis, days: bt.days, stats };
+}
+async function doRefresh(force) {
+  if ((document.hidden && !force) || !state.data || !state.data.markets.length) return;
+  let ok = 0, flow = 0;
+  await Promise.all(state.data.markets.map(async m => {
+    const [q, rows] = await Promise.all([liveQuote(m.symbol), m.orderflow ? liveRows(m.symbol) : null]);
+    if (q) {
+      ok++; m.price = q.price; m.change_pct = q.change_pct;
       const d = new Date().toISOString().slice(5, 10), last = m.history[m.history.length - 1];
       if (last && last.d === d) last.c = q.price; else m.history.push({ d, c: q.price });
-    });
-    if (!ok) return;   // keep what data.json shows
-    $('#updatedAt').textContent = 'Live ' + new Date().toLocaleTimeString();
-    const tk = $('#tickerTrack'), anim = tk.getAnimations ? tk.getAnimations()[0] : null, t = anim ? anim.currentTime : null;
-    [renderMetrics, renderTicker, drawChart].forEach(fn => { try { fn(); } catch (e) { console.error(fn.name, e); } });
-    const a2 = tk.getAnimations ? tk.getAnimations()[0] : null; if (a2 && t != null) a2.currentTime = t;   // marquee does not jump
-  } finally { liveBusy = false; }
+    }
+    const f = rows && m.orderflow ? computeFlow(m, rows) : null;
+    if (f) { Object.assign(m.orderflow, f, { live: true }); m.orderflow.match = matchStats(m.symbol, f.signals); flow++; }
+  }));
+  if (!ok && !flow) return;   // keep what data.json shows
+  state.liveAt = Date.now();
+  $('#updatedAt').textContent = 'Live ' + new Date().toLocaleTimeString() + (flow ? ` · flow ${flow}` : '');
+  const tk = $('#tickerTrack'), anim = tk.getAnimations ? tk.getAnimations()[0] : null, t = anim ? anim.currentTime : null;
+  [renderMetrics, renderTicker, drawChart].forEach(fn => { try { fn(); } catch (e) { console.error(fn.name, e); } });
+  const a2 = tk.getAnimations ? tk.getAnimations()[0] : null; if (a2 && t != null) a2.currentTime = t;   // marquee does not jump
+}
+function refreshLive(force) { if (!livePromise) livePromise = doRefresh(force).catch(e => console.error('live refresh', e)).finally(() => { livePromise = null; }); return livePromise; }
+async function loadBacktest() {
+  try { const r = await fetch('./backtest.json?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status); state.bt = await r.json(); }
+  catch (e) { state.bt = null; if (!state.btWarned) { state.btWarned = true; sysMsg(`Historical stats missing (backtest.json: ${e.message}). Win rates stay unknown until you run the "Daily backtest" GitHub Action.`); } }
 }
 function startLive() {
   if (liveTimer) return;
-  refreshLive(); liveTimer = setInterval(refreshLive, LIVE_MS);
+  refreshLive(); liveTimer = setInterval(() => refreshLive(), LIVE_MS);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshLive(); });
 }
 
@@ -546,6 +630,7 @@ const DATA_GUIDE = `Market data fields: price, change_pct (vs previous close), l
 of = order flow on 5-minute bars (tf). real_delta=true means buy/sell volume is REAL aggressor volume from the exchange (Binance taker volume, BTC). real_delta=false means an ESTIMATE from candles (up-close candle = buy volume), a proxy and NOT a footprint or DOM. age_min = minutes since the last candle: futures from Yahoo (Gold GC, Nasdaq NQ) are about 10-15 min late, so give levels, zones and conditional plans, not instant entries. atr5 = 5m ATR. delta = buy minus sell volume of the last bar; rel_delta = delta / 20-bar average volume; cvd = cumulative delta; cvd_chg_12 = CVD change over 12 bars. signals = recent Pulse breakouts/traps and CVD divergences (confirmed bars only). imbalance_zones = unmitigated 3x buy/sell zones. walls = volume-spike swing highs/lows not yet broken (liquidity proxy). blocks = recent high-volume bars. vp200 = POC/VAH/VAL of the last 200 bars. sessions = POC/VAH/VAL of previous (prev) and current (cur) Daily, Asian (00-08 UTC), London (08-16) and New York (13-21).
 m1 = 1-MINUTE CONFIRMATION: delta_5m and delta_15m = sum of 1-minute delta over the last 5/15 minutes, dir = who is aggressive now, last_close.
 match = HISTORICAL STATS of the signals active now (from a daily backtest of every signal: Binance 5m for about 1 year on BTC, Yahoo 5m for about 60 days on the others; see basis and days). Each entry: sig, t, cell (same signal + same session + with/against the daily trend, or "all conditions" when that cell has fewer than 30 cases), n samples, win_pct, ci (interval: 99.9% for cells, 95% for all conditions), avg_r, recent_win_pct (last 30% of the data), edge = positive / inconclusive / negative / unproven (n<30). Rule: enter at next bar open, stop 1 x atr5, target 2 x atr5, max 24 bars, no fees or slippage, so breakeven win rate is 33%. Signals cluster in time and the past may not repeat, so "positive" is weak evidence, never proof. Each signal in of.signals also has session (asian/london/ny/late, UTC) and trend (with/against the daily SMA20).
+meta = freshness. data_json_updated = the 15-minute file (ind, walls, imbalance_zones, blocks, vp200, sessions come from it). browser_refresh = recomputed in the browser each minute and right before this message (price, change_pct, and of.delta, rel_delta, cvd, cvd_chg_12, atr5, signals, m1, match). backtest_generated = when the historical stats were built; "MISSING" means NO historical stats exist: say win rates are unknown, never rate a setup above Low, and tell the user to run the "Daily backtest" GitHub Action. Mention the data age you rely on.
 A market without "of" has no usable volume (for example EUR/USD).`;
 const COMMON = `Rules: base every answer on the market data in this chat and quote exact numbers. Never invent prices, news, indicators or win rates: the only win rates you may quote are the ones in of.match, with n and the interval. If there is no match entry or n<30, say the win rate is unknown. Never promise profit. Give the main risk and the invalidation. Answer in the user's language (Darija, Arabic, French or English), short and structured. End with: Not financial advice.`;
 const SCORECARD = `Setup scorecard (use it for every setup, show the 5 checks as yes/no):
@@ -570,7 +655,7 @@ function initModes() {
   const sel = $('#modeSelect');
   sel.innerHTML = Object.entries(MODES).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
   sel.value = MODES[load('aicc.mode', 'trading')] ? load('aicc.mode', 'trading') : 'trading';
-  if (!$('#systemPrompt').value.trim() || load('aicc.modeVer', '') !== '4') { applyMode(sel.value, true); save('aicc.modeVer', '4'); }   // first visit: preload the prompt, never overwrite your own text
+  if (!$('#systemPrompt').value.trim() || load('aicc.modeVer', '') !== '5') { applyMode(sel.value, true); save('aicc.modeVer', '5'); }   // first visit: preload the prompt, never overwrite your own text
   sel.onchange = () => applyMode(sel.value, true);
 }
 
