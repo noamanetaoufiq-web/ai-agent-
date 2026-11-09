@@ -2,7 +2,7 @@
 """Daily backtest -> backtest.json. Replays every order-flow signal on the longest history available:
 BTC: up to 365 days of Binance 5m klines (REAL taker delta). Others: Yahoo 5m, about 60 days (Yahoo's limit; delta is an estimate).
 Stats are grouped by signal, and by signal + session (UTC) + with/against the daily trend (price vs SMA20 of daily closes)."""
-import json
+import json, sys
 from datetime import datetime, timezone
 import fetch_data as fd
 
@@ -53,5 +53,17 @@ def run():
     print("Wrote backtest.json")
 
 
+def fresh(hours=24):
+    try:
+        with open("backtest.json", encoding="utf-8") as f:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(json.load(f)["generated"])
+        return age.total_seconds() < hours * 3600
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
-    run()
+    if "--if-stale" in sys.argv and fresh():
+        print("backtest.json is less than 24 h old, skipped")
+    else:
+        run()

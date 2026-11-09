@@ -49,3 +49,7 @@ Prices refresh in the browser every 60 s (Yahoo direct, public CORS proxy as fal
 - While the page is open, prices and order flow are recomputed **in the browser every 60 s and again right before each message** (BTC from Binance 1m klines with real taker volume, the others from Yahoo 1m, direct or through a public CORS proxy). If a source fails, the 15-minute `data.json` values stay and `meta` tells the agent how old they are.
 - Historical stats (`backtest.json`) are loaded by the page too and matched to the live signals. If the file is missing the agent is told, and the chat shows a warning: run the "Daily backtest" workflow.
 - Browser access to Binance/Yahoo (CORS) was not tested here: open the console if `flow` never appears next to "Live".
+
+## Speed and history on first run
+- BTC price streams live over a Binance websocket (about every 3 s on screen). Other prices refresh every 15 s, order flow every 60 s and before each message. Gold (GC) and Nasdaq (NQ) from Yahoo stay about 10-15 min behind: that is Yahoo's delay, polling faster cannot fix it.
+- "Update data" now builds `backtest.json` by itself when it is missing or older than 24 h (BTC needs a few minutes the first time). After pushing the repo, run "Update data" once and wait for it to finish: from then on the history is already there.

@@ -433,7 +433,7 @@ function drawChart() {
 }
 
 /* ---------- live prices + order flow: recomputed in the browser every 60 s and right before every message ---------- */
-const LIVE_MS = 60000; let liveTimer = 0, livePromise = null;
+const LIVE_MS = 60000, QUOTE_MS = 15000; let liveTimer = 0, quoteTimer = 0, livePromise = null, wsAt = 0;
 const SIGDIR = { 'Pulse BUY breakout': 1, 'Pulse SELL breakout': -1, 'Trapped sellers': 1, 'Trapped buyers': -1, 'CVD bullish divergence': 1, 'CVD bearish divergence': -1 };
 const YF = s => `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(s)}`;
 const PROXY = u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u);   // public CORS proxy, fallback only
@@ -520,11 +520,17 @@ function matchStats(sym, signals) {   // historical stats (backtest.json) of the
   }).filter(Boolean);
   return { basis: bt.basis, days: bt.days, stats };
 }
-async function doRefresh(force) {
+function repaint(fns) {   // re-render without the ticker marquee jumping back to the start
+  const tk = $('#tickerTrack'), an = tk.getAnimations ? tk.getAnimations()[0] : null, t = an ? an.currentTime : null;
+  fns.forEach(fn => { try { fn(); } catch (e) { console.error(fn.name, e); } });
+  const a2 = tk.getAnimations ? tk.getAnimations()[0] : null; if (a2 && t != null) a2.currentTime = t;
+}
+async function doRefresh(force, quotesOnly) {
   if ((document.hidden && !force) || !state.data || !state.data.markets.length) return;
   let ok = 0, flow = 0;
   await Promise.all(state.data.markets.map(async m => {
-    const [q, rows] = await Promise.all([liveQuote(m.symbol), m.orderflow ? liveRows(m.symbol) : null]);
+    const skipQ = m.symbol === 'BTC-USD' && Date.now() - wsAt < 5000;   // BTC price already streams over the websocket
+    const [q, rows] = await Promise.all([skipQ ? null : liveQuote(m.symbol), !quotesOnly && m.orderflow ? liveRows(m.symbol) : null]);
     if (q) {
       ok++; m.price = q.price; m.change_pct = q.change_pct;
       const d = new Date().toISOString().slice(5, 10), last = m.history[m.history.length - 1];
@@ -534,20 +540,34 @@ async function doRefresh(force) {
     if (f) { Object.assign(m.orderflow, f, { live: true }); m.orderflow.match = matchStats(m.symbol, f.signals); flow++; }
   }));
   if (!ok && !flow) return;   // keep what data.json shows
-  state.liveAt = Date.now();
-  $('#updatedAt').textContent = 'Live ' + new Date().toLocaleTimeString() + (flow ? ` · flow ${flow}` : '');
-  const tk = $('#tickerTrack'), anim = tk.getAnimations ? tk.getAnimations()[0] : null, t = anim ? anim.currentTime : null;
-  [renderMetrics, renderTicker, drawChart].forEach(fn => { try { fn(); } catch (e) { console.error(fn.name, e); } });
-  const a2 = tk.getAnimations ? tk.getAnimations()[0] : null; if (a2 && t != null) a2.currentTime = t;   // marquee does not jump
+  state.liveAt = Date.now(); if (!quotesOnly) state.flowN = flow;
+  $('#updatedAt').textContent = 'Live ' + new Date().toLocaleTimeString() + (state.flowN ? ` · flow ${state.flowN}` : '');
+  repaint(quotesOnly ? [renderMetrics, renderTicker] : [renderMetrics, renderTicker, drawChart]);
 }
-function refreshLive(force) { if (!livePromise) livePromise = doRefresh(force).catch(e => console.error('live refresh', e)).finally(() => { livePromise = null; }); return livePromise; }
+function refreshLive(force, quotesOnly) { if (!livePromise) livePromise = doRefresh(force, quotesOnly).catch(e => console.error('live refresh', e)).finally(() => { livePromise = null; }); return livePromise; }
 async function loadBacktest() {
   try { const r = await fetch('./backtest.json?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status); state.bt = await r.json(); }
-  catch (e) { state.bt = null; if (!state.btWarned) { state.btWarned = true; sysMsg(`Historical stats missing (backtest.json: ${e.message}). Win rates stay unknown until you run the "Daily backtest" GitHub Action.`); } }
+  catch (e) { state.bt = null; if (!state.btWarned) { state.btWarned = true; sysMsg(`Historical stats missing (backtest.json: ${e.message}). The "Update data" workflow builds it on its next run (a few minutes after you push); until then win rates stay unknown.`); } }
+}
+function connectBtc() {   // real-time BTC price (Binance ticker stream, about 1 update per second)
+  let last = 0, ws;
+  const open = () => {
+    try { ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@ticker'); } catch { return; }
+    ws.onmessage = e => {
+      let d; try { d = JSON.parse(e.data); } catch { return; }
+      const mk = state.data && state.data.markets.find(x => x.symbol === 'BTC-USD'); if (!mk || !d.c) return;
+      wsAt = Date.now(); mk.price = +d.c; mk.change_pct = Math.round(+d.P * 100) / 100;   // 24 h change
+      const h = mk.history, day = new Date().toISOString().slice(5, 10); if (h.length && h[h.length - 1].d === day) h[h.length - 1].c = mk.price;
+      if (Date.now() - last > 3000 && !document.hidden) { last = Date.now(); repaint([renderMetrics, renderTicker]); }
+    };
+    ws.onclose = () => setTimeout(open, 5000);
+    ws.onerror = () => ws.close();
+  };
+  open();
 }
 function startLive() {
   if (liveTimer) return;
-  refreshLive(); liveTimer = setInterval(() => refreshLive(), LIVE_MS);
+  refreshLive(); liveTimer = setInterval(() => refreshLive(), LIVE_MS); quoteTimer = setInterval(() => { if (!document.hidden) refreshLive(false, true); }, QUOTE_MS); connectBtc();
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshLive(); });
 }
 
