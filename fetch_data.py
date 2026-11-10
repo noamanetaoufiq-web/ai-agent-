@@ -238,6 +238,7 @@ def order_flow(bars, atr_d, sma20=None):
             "delta": round(bars[-1]["d"]), "rel_delta": round(bars[-1]["d"] / a20[-1], 2) if a20[-1] else 0,
             "cvd": round(cvd[-1]), "cvd_chg_12": round(cvd[-1] - cvd[-13]), "signals": ev,
             "imbalance_zones": [{"side": z[0], "top": round(z[1], 4), "bottom": round(z[2], 4)} for z in zones[-4:]],
+            "bars5": [[b["t"], round(b["o"], 2), round(b["h"], 2), round(b["l"], 2), round(b["c"], 2)] for b in bars[-300:]],   # real 5m bars for the browser Monte Carlo (not sent to the AI)
             "walls": live_walls, "blocks": blocks, "vp200": profile(v200, (max(b["h"] for b in v200) - min(b["l"] for b in v200)) / 30), "sessions": sessions}
 
 

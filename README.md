@@ -58,3 +58,9 @@ Prices refresh in the browser every 60 s (Yahoo direct, public CORS proxy as fal
 - Order flow, volume profile and the backtest come from **GC futures** (spot has no volume). The workflow also fetches **XAUUSD=X** (spot) and measures the **basis** (GC minus spot) on the same 1-minute candles, then converts every GC level to spot: `of.spot` in the GC market, `of.m1.last_close_spot` live.
 - Spot daily history (RSI, SMA, ATR, 30-day range) comes from XAUUSD=X itself (Yahoo has it from 2003).
 - Basis jumps when the futures contract rolls (every ~2 months) and moves with interest rates. Check `basis_spread` and do not trade spot levels converted across a roll.
+
+## Swarm (button "Swarm" in the header)
+Browser port of the Trading Swarm pipeline (the zip you sent): Macro/News -> Technical -> Orchestrator (LLM agents, JSON out) -> **Inspector** (code: R:R, confidence, stop 0.5-4 ATR, spread/stop, levels within 30 ATR of the live price, data age, news freeze, macro alignment, lot sizing with costs) -> **Backtest gate** (`of.match`) -> **Trade validator** (block-bootstrap Monte Carlo of real 5m bars, 10/100/1000/5000 runs, vs luck and break-even) -> LLM audit (veto only). Code decides; the LLM can only veto. Output: APPROVED / APPROVED_REDUCED / REJECTED / WAIT with lots and risk, and a button to post the report in the chat. Analysis only: it sends nothing to a broker.
+- Lot values (USD per 1.0 move per lot, spread, min lot) are typical CFD numbers: check them with your broker in the "Instrument specs" box.
+- It needs `backtest.json` (history) to approve anything: no historical evidence = no trade.
+- Optional Cloudflare Worker (`cloudflare/worker.js`) as a faster, more reliable Yahoo proxy for the browser: paste its URL in Access > Proxy URL.

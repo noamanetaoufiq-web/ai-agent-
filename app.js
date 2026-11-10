@@ -146,10 +146,10 @@ async function listModels(p) {
   let ids = pre.type === 'gemini'
     ? (j.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent')).map(m => String(m.name).replace(/^models\//, ''))
     : (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean);
-  ids = [...new Set(ids)].sort();
+  ids = [...new Set(ids)].filter(id => !/embed|moderation|codestral|ocr|whisper|tts|guard|rerank|transcri|dall-e|imagen|-image|audio|realtime|robotics|veo/i.test(id)).sort();   // chat models only
   return p.vendor === 'openrouter' ? ids.sort((a, b) => (b.endsWith(':free') - a.endsWith(':free')) || a.localeCompare(b)) : ids;
 }
-const bestPick = (v, ids) => (MODELS[v] || []).find(m => ids.includes(m)) || ids.find(m => /flash.*latest/.test(m)) || ids.find(m => /free/.test(m)) || ids[0];
+const bestPick = (v, ids) => (MODELS[v] || []).find(m => ids.includes(m)) || ids.find(m => /flash.*latest/.test(m)) || ids.find(m => /free/.test(m)) || ids.find(m => /(large|medium|small)-latest|sonnet|llama-3\.3|gpt-4o|chat/.test(m)) || ids[0];
 async function testKey(row) {
   const g = f => row.querySelector(`[data-f="${f}"]`), st = row.querySelector('.vstat');
   const p = { vendor: g('vendor').value, key: g('key').value.trim(), baseUrl: g('baseUrl').value.trim(), defaultModel: g('defaultModel').value.trim() };
@@ -361,7 +361,7 @@ $('#prompt').addEventListener('paste', e => { const fs = [...(e.clipboardData?.f
 const acc = load('aicc.access', { data: false, search: false });
 $('#accData').checked = !!acc.data; $('#accSearch').checked = !!acc.search;
 $('#accessWrap').addEventListener('change', () => save('aicc.access', { data: $('#accData').checked, search: $('#accSearch').checked }));
-const dataDigest = () => JSON.stringify({ meta: { now: new Date().toISOString(), data_json_updated: state.data.updated || null, browser_refresh: state.liveAt ? new Date(state.liveAt).toISOString() : null, backtest_generated: state.bt ? state.bt.generated : 'MISSING' }, markets: (state.data.markets || []).map(m => ({ name: m.name, symbol: m.symbol, price: m.price, change_pct: m.change_pct, last7: m.history.slice(-7).map(h => h.c), ind: m.indicators || undefined, of: m.orderflow || undefined })) });
+const dataDigest = () => JSON.stringify({ meta: { now: new Date().toISOString(), data_json_updated: state.data.updated || null, browser_refresh: state.liveAt ? new Date(state.liveAt).toISOString() : null, backtest_generated: state.bt ? state.bt.generated : 'MISSING' }, markets: (state.data.markets || []).map(m => ({ name: m.name, symbol: m.symbol, price: m.price, change_pct: m.change_pct, last7: m.history.slice(-7).map(h => h.c), ind: m.indicators || undefined, of: m.orderflow ? { ...m.orderflow, bars5: undefined } : undefined })) });
 
 const dz = $('#chatPanel');
 ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('over'); }));
@@ -436,7 +436,7 @@ function drawChart() {
 const LIVE_MS = 60000, QUOTE_MS = 15000; let liveTimer = 0, quoteTimer = 0, livePromise = null, wsAt = 0;
 const SIGDIR = { 'Pulse BUY breakout': 1, 'Pulse SELL breakout': -1, 'Trapped sellers': 1, 'Trapped buyers': -1, 'CVD bullish divergence': 1, 'CVD bearish divergence': -1 };
 const YF = s => `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(s)}`;
-const PROXY = u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u);   // public CORS proxy, fallback only
+const PROXY = u => (load('aicc.proxy', '') || 'https://api.allorigins.win/raw') + '?url=' + encodeURIComponent(u);   // your own Cloudflare Worker (cloudflare/worker.js) if set   // public CORS proxy, fallback only
 async function getJSON(urls) {
   for (const u of urls) { try { const r = await fetch(u, { cache: 'no-store' }); if (r.ok) return await r.json(); } catch { /* try next route */ } }
   return null;
@@ -652,7 +652,7 @@ m1 = 1-MINUTE CONFIRMATION: delta_5m and delta_15m = sum of 1-minute delta over 
 match = HISTORICAL STATS of the signals active now (from a daily backtest of every signal: Binance 5m for about 1 year on BTC, Yahoo 5m for about 60 days on the others; see basis and days). Each entry: sig, t, cell (same signal + same session + with/against the daily trend, or "all conditions" when that cell has fewer than 30 cases), n samples, win_pct, ci (interval: 99.9% for cells, 95% for all conditions), avg_r, recent_win_pct (last 30% of the data), edge = positive / inconclusive / negative / unproven (n<30). Rule: enter at next bar open, stop 1 x atr5, target 2 x atr5, max 24 bars, no fees or slippage, so breakeven win rate is 33%. Signals cluster in time and the past may not repeat, so "positive" is weak evidence, never proof. Each signal in of.signals also has session (asian/london/ny/late, UTC) and trend (with/against the daily SMA20).
 meta = freshness. data_json_updated = the 15-minute file (ind, walls, imbalance_zones, blocks, vp200, sessions come from it). browser_refresh = recomputed in the browser each minute and right before this message (price, change_pct, and of.delta, rel_delta, cvd, cvd_chg_12, atr5, signals, m1, match). backtest_generated = when the historical stats were built; "MISSING" means NO historical stats exist: say win rates are unknown, never rate a setup above Low, and tell the user to run the "Daily backtest" GitHub Action. Mention the data age you rely on.
 GOLD: the user TRADES spot XAUUSD (market "Gold spot (XAUUSD)") but order flow only exists on GC futures. of.spot (inside the GC market) has the same levels already converted to spot (futures level minus basis, measured on the same minutes), and of.m1.last_close_spot is the last GC price in spot terms. For any XAUUSD entry, stop or target use ONLY of.spot levels and last_close_spot, never raw GC levels. State the basis and basis_spread. If of.spot is missing, say the conversion is unavailable and give no XAUUSD levels. The spot market has no volume of its own; its ind (RSI, SMA, ATR) comes from real spot daily history. Futures roll to a new contract changes the basis, so be careful near roll dates.\nA market without "of" has no usable volume (for example EUR/USD).`;
-const COMMON = `Rules: base every answer on the market data in this chat and quote exact numbers. Never invent prices, news, indicators or win rates: the only win rates you may quote are the ones in of.match, with n and the interval. If there is no match entry or n<30, say the win rate is unknown. Never promise profit. Give the main risk and the invalidation. Answer in the user's language (Darija, Arabic, French or English), short and structured. End with: Not financial advice.`;
+const COMMON = `Rules: base every answer on the market data in this chat and quote exact numbers. Every price you give must be within 30 x atr5 of that market's current price field; a level you remember that is far from it is wrong, never use it. Never invent prices, news, indicators or win rates: the only win rates you may quote are the ones in of.match, with n and the interval. If there is no match entry or n<30, say the win rate is unknown. Never promise profit. Give the main risk and the invalidation. Answer in the user's language (Darija, Arabic, French or English), short and structured. End with: Not financial advice.`;
 const SCORECARD = `Setup scorecard (use it for every setup, show the 5 checks as yes/no):
 1) Daily trend agrees (ind.trend and price vs sma20/sma50). 2) A recent 5m signal in of.signals points the same way. 3) 1-minute confirmation: of.m1.dir and delta_5m agree with the direction. 4) Price is within 0.5 x atr5 of a key level (session POC/VAH/VAL, vp200, an unmitigated imbalance zone, or a wall). 5) The matching of.match entry has edge "positive" (n>=30).
 Confidence: 4-5 = High, 3 = Medium, 0-2 = Low (say "no trade"). Then give entry zone, stop (about 1 x atr5), target (2R), and quote the signal's historical win_pct with n and ci. If of.real_delta is false or age_min is above 5, lower your confidence one step and say why.`;
@@ -675,8 +675,9 @@ function initModes() {
   const sel = $('#modeSelect');
   sel.innerHTML = Object.entries(MODES).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
   sel.value = MODES[load('aicc.mode', 'trading')] ? load('aicc.mode', 'trading') : 'trading';
-  if (!$('#systemPrompt').value.trim() || load('aicc.modeVer', '') !== '6') { applyMode(sel.value, true); save('aicc.modeVer', '6'); }   // first visit: preload the prompt, never overwrite your own text
+  if (!$('#systemPrompt').value.trim() || load('aicc.modeVer', '') !== '7') { applyMode(sel.value, true); save('aicc.modeVer', '7'); }   // first visit: preload the prompt, never overwrite your own text
   sel.onchange = () => applyMode(sel.value, true);
+  const px = $('#proxyUrl'); if (px) { px.value = load('aicc.proxy', ''); px.onchange = () => save('aicc.proxy', px.value.trim()); }
 }
 
 /* ---------- init ---------- */

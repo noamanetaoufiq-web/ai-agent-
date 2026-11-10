@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="styles.css?v=5">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
 <script src="app.js?v=5" defer></script>
+<script src="swarm.js?v=5" defer></script>
 </head>
 <body>
 <div id="ticker" aria-label="Market ticker"><div id="tickerTrack"><span class="tk-empty">Loading markets…</span></div></div>
@@ -37,6 +38,7 @@
       <details id="accessWrap"><summary>Access</summary>
         <label class="opt"><input type="checkbox" id="accData"> Let the agent read the market data (data.json)</label>
         <label class="opt"><input type="checkbox" id="accSearch"> Let the agent search Google (Gemini keys only)</label>
+        <label class="opt">Proxy URL (optional, see cloudflare/worker.js) <input id="proxyUrl" type="url" placeholder="https://your-worker.workers.dev" autocomplete="off"></label>
       </details>
     </div>
     <div class="composer">
