@@ -275,6 +275,39 @@ function swReport(r) {   // built by code, not by the LLM
   return L.join('\n');
 }
 
+/* ---- paper journal: forward test with live candles ---- */
+const SWJ = 'aicc.journal';
+function swResolve(t, candles) {
+  /* Same rules as the Monte Carlo, on real 1-minute candles after the save: pending until the entry is touched (limit/stop), then SL / TP,
+     same candle touching both counts as SL, time-out after MAXHOLD x 5 min at the close. R is net of spread + slippage. */
+  const long = t.dir === 'LONG', dist = Math.abs(t.entry - t.sl), rr = Math.abs(t.tp - t.entry) / dist, e = { ...t };
+  for (const k of candles) {
+    if (k.t < e.created) continue;
+    if (e.status === 'pending') {
+      if (k.t - e.created > SW.MAXWAIT * 300) { e.status = 'expired'; e.closed = k.t; return e; }
+      if (!(long ? (e.kind === 'limit' ? k.l <= e.entry : k.h >= e.entry) : (e.kind === 'limit' ? k.h >= e.entry : k.l <= e.entry))) continue;
+      e.status = 'open'; e.opened = k.t;
+    }
+    if (long ? k.l <= e.sl : k.h >= e.sl) { e.status = 'sl'; e.r = -1 - e.costR; e.closed = k.t; return e; }
+    if (long ? k.h >= e.tp : k.l <= e.tp) { e.status = 'tp'; e.r = rr - e.costR; e.closed = k.t; return e; }
+    if (k.t - e.opened >= SW.MAXHOLD * 300) { e.status = 'timeout'; e.r = Math.max(-1, Math.min(rr, (long ? k.c - e.entry : e.entry - k.c) / dist)) - e.costR; e.closed = k.t; return e; }
+  }
+  return e;
+}
+function swJEntry(res, price) {   // journal entry from an approved swarm result
+  const P = res.plan, mk = res.mk, dist = Math.abs(P.entry - P.stop_loss), long = P.direction === 'LONG';
+  return { id: Date.now().toString(36), key: res.key, symbol: mk.trade, dir: P.direction, entry: P.entry, sl: P.stop_loss, tp: P.take_profit, lots: res.final.sizing.lots, risk_usd: res.final.sizing.risk_usd,
+    rr: Math.abs(P.take_profit - P.entry) / dist, costR: (mk.spread + mk.slip) / dist, kind: long ? (P.entry < price ? 'limit' : 'stop') : (P.entry > price ? 'limit' : 'stop'),
+    verdict: res.final.verdict, confirm: res.conf ? `${res.conf.score}/${res.conf.total}` : null, evidence: res.gate && res.gate.best ? `${res.gate.best.sig} n=${res.gate.best.n} avg ${res.gate.best.avg_r}R` : null,
+    saved: new Date().toISOString(), created: Math.ceil(Date.now() / 60000) * 60, status: 'pending' };
+}
+function swJStats(j) {
+  const closed = j.filter(t => ['tp', 'sl', 'timeout'].includes(t.status)), rs = closed.map(t => t.r), n = rs.length, tot = rs.reduce((a, b) => a + b, 0);
+  return { closed: n, open: j.filter(t => t.status === 'open').length, pending: j.filter(t => t.status === 'pending').length, expired: j.filter(t => t.status === 'expired').length,
+    win_pct: n ? Math.round(rs.filter(r => r > 0).length / n * 1000) / 10 : null, avg_r: n ? Math.round(tot / n * 100) / 100 : null, total_r: Math.round(tot * 100) / 100,
+    pnl_usd: Math.round(closed.reduce((a, t) => a + t.r * t.risk_usd, 0) * 100) / 100 };
+}
+
 /* ---- UI ---- */
 function swCfg() {
   const d = { equity: 10000, riskPct: 1, minRR: 2, conf: 60, minConfirm: 4, maxAge: 30, audit: true, markets: {} };
@@ -307,7 +340,11 @@ function swInitUI() {
         <label>Lot step <input id="swStep" type="number" step="any"></label>
       </div></details>
     <div class="toolbar"><button id="swRun" class="btn primary" type="button">Run swarm</button><span class="spacer"></span><button id="swPost" class="btn" type="button" hidden>Send report to chat</button></div>
-    <div id="swSteps" role="status"></div><div id="swOut"></div></div>`;
+    <div id="swSteps" role="status"></div><div id="swOut"></div>
+    <div class="toolbar"><button id="swSave" class="btn" type="button" hidden>Save as paper trade</button></div>
+    <details id="swJ" open><summary>Paper journal <span id="swJn"></span></summary><p class="mut">Forward test: approved plans are followed with real 1-minute candles (the page must be open; it catches up to 5 days later). Judge the system on 30+ closed trades, not before.</p>
+      <div id="swJStats"></div><div id="swJList"></div>
+      <div class="toolbar"><button id="swJExport" class="btn sm" type="button">Export JSON</button><button id="swJClear" class="btn sm" type="button">Clear journal</button></div></details></div>`;
   document.body.appendChild(el);
   const g = id => $('#' + id), btn = document.createElement('button');
   btn.id = 'openSwarm'; btn.type = 'button'; btn.className = 'btn'; btn.textContent = '🐝 Swarm';
@@ -323,11 +360,34 @@ function swInitUI() {
     cfg.markets = { ...cfg.markets, [key]: { upp: n('swUpp', 1), spread: n('swSpread', 0), slip: n('swSlip', 0), minLot: n('swMin', 0.01), step: n('swStep', 0.01) } };
     swSave(cfg); return cfg;
   };
-  btn.onclick = () => { fill(); el.classList.add('open'); };
+  let last = null;
+  const jsave = j => { try { localStorage.setItem(SWJ, JSON.stringify(j.slice(-500))); } catch { /* ignore */ } };
+  const jload = () => { try { const j = JSON.parse(localStorage.getItem(SWJ) || '[]'); return Array.isArray(j) ? j : []; } catch { return []; } };
+  const jrender = () => {
+    const j = jload(), st = swJStats(j);
+    g('swJn').textContent = `(${j.length})`;
+    g('swJStats').innerHTML = `<div class="sw-step ${st.avg_r > 0 ? 'ok' : st.closed ? 'bad' : 'run'}"><b>${st.closed} closed</b> <span>win ${st.win_pct ?? '-'}% | average ${st.avg_r ?? '-'}R | total ${st.total_r}R | $${st.pnl_usd} | open ${st.open}, pending ${st.pending}, expired ${st.expired}${st.closed < 30 ? ' | too few trades to conclude anything' : ''}</span></div>`;
+    g('swJList').innerHTML = j.slice().reverse().slice(0, 30).map(t => `<div class="sw-step ${t.status === 'tp' ? 'ok' : t.status === 'sl' ? 'bad' : 'run'}">${esc(t.saved.slice(5, 16).replace('T', ' '))} <b>${esc(t.key)} ${esc(t.dir)}</b> <span>${t.kind} ${swF(t.entry)} / SL ${swF(t.sl)} / TP ${swF(t.tp)} / ${t.lots} lots | <b>${esc(t.status)}</b>${t.r !== undefined ? ` ${t.r > 0 ? '+' : ''}${swF(t.r)}R` : ''}</span></div>`).join('');
+  };
+  let ticking = false;
+  const tick = async () => {
+    if (ticking || document.hidden) return; ticking = true;
+    try {
+      const j = jload(), live = j.filter(t => t.status === 'pending' || t.status === 'open'); if (!live.length) return;
+      const rows = {}; for (const t of live) if (!(t.symbol in rows)) rows[t.symbol] = await liveRows(t.symbol).catch(() => null);
+      let changed = false;
+      j.forEach((t, i) => { const r = rows[t.symbol]; if (!r || !(t.status === 'pending' || t.status === 'open')) return; const n = swResolve(t, r.map(x => ({ t: x[0], o: x[1], h: x[2], l: x[3], c: x[4] }))); if (n.status !== t.status) { j[i] = n; changed = true; } });
+      if (changed) { jsave(j); jrender(); }
+    } finally { ticking = false; }
+  };
+  setInterval(tick, 60000); setTimeout(tick, 6000); jrender();
+  g('swSave').onclick = () => { if (!last || !last.final.sizing) return; const j = jload(); j.push(swJEntry(last, last.ctx.price)); jsave(j); g('swSave').hidden = true; jrender(); setTimeout(tick, 100); };
+  g('swJClear').onclick = () => { if (confirm('Delete the whole paper journal?')) { jsave([]); jrender(); } };
+  g('swJExport').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(jload(), null, 1)], { type: 'application/json' })); a.download = 'paper-journal.json'; a.click(); };
+  btn.onclick = () => { fill(); jrender(); el.classList.add('open'); };
   g('swClose').onclick = () => el.classList.remove('open');
   el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); });
   g('swMarket').onchange = fill;
-  let last = null;
   g('swPost').onclick = () => {
     if (!last) return;
     const md = swReport(last); ensureChat('Swarm ' + last.key); state.view.push({ role: 'ai', text: md }); addMsg('ai', md); saveCurrent(); el.classList.remove('open');
@@ -335,7 +395,7 @@ function swInitUI() {
   g('swRun').onclick = async () => {
     if (!state.profiles.some(p => p.key)) return openVault();
     const cfg = read(), key = g('swMarket').value, box = g('swSteps'), rows = {};
-    g('swRun').disabled = true; g('swPost').hidden = true; g('swOut').innerHTML = ''; box.innerHTML = '';
+    g('swRun').disabled = true; g('swPost').hidden = true; g('swSave').hidden = true; g('swOut').innerHTML = ''; box.innerHTML = '';
     const icon = { run: '⏳', ok: '✅', bad: '⛔' };
     const ui = { step(id, title, status, detail, data) {
       let r = rows[id]; if (!r) { r = rows[id] = document.createElement('div'); box.appendChild(r); }
@@ -346,7 +406,7 @@ function swInitUI() {
       last = await swRun(cfg, key, ui);
       const f = last.final, good = f.verdict.startsWith('APPROVED');
       g('swOut').innerHTML = `<div class="sw-final ${good ? 'ok' : 'bad'}"><b>${esc(f.verdict)}</b>${f.sizing && f.sizing.lots ? ` · ${f.sizing.lots} lots · risk $${f.sizing.risk_usd}` : ''}<br>${esc(f.reasons.join(' | '))}</div>`;
-      g('swPost').hidden = false;
+      g('swPost').hidden = false; g('swSave').hidden = !good;
     } catch (e) { g('swOut').innerHTML = `<div class="sw-final bad">${esc(e.message)}</div>`; }
     g('swRun').disabled = false;
   };

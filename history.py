@@ -31,7 +31,7 @@ def _time(s):
     return None
 
 
-def _row(parts):
+def _row(parts, flow=False):
     p = [x.strip().strip('"') for x in parts]
     if len(p) < 5:
         return None
@@ -50,24 +50,29 @@ def _row(parts):
         v = float(p[k + 4]) if len(p) > k + 4 else 0.0
     except ValueError:
         v = 0.0
-    return (t, o, h, l, c, v)
+    buy = None
+    if flow and len(p) > k + 5:                              # flow file: ..., volume, buy_volume (REAL aggressor buy volume)
+        try: buy = float(p[k + 5])
+        except ValueError: buy = None
+    return (t, o, h, l, c, v, buy)
 
 
 def read_history(path, utc_offset=0, max_gap=300):
-    """-> [(t, o, h, l, c, v, None)] sorted by time in UTC, duplicates removed. Raises ValueError when the file is not usable."""
+    """-> [(t, o, h, l, c, v, buy or None)] sorted by time in UTC, duplicates removed. Raises ValueError when the file is not usable."""
     m = re.search(r"utc([+-]\d+)", os.path.basename(path), re.I)
     off = int(m.group(1)) if m else utc_offset
     opener = gzip.open if path.endswith(".gz") else open
-    rows, delim, _fmt[0] = {}, None, None
+    rows, delim, flow, _fmt[0] = {}, None, False, None
     with opener(path, "rt", encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             if not line.strip():
                 continue
             if delim is None:
                 delim = ";" if ";" in line else "\t" if "\t" in line else ","
-            r = _row(line.rstrip("\r\n").split(delim))
+                flow = "buy" in line.lower()                 # header like: time,open,high,low,close,volume,buy_volume
+            r = _row(line.rstrip("\r\n").split(delim), flow)
             if r:
-                rows[r[0] - off * 3600] = (r[0] - off * 3600,) + r[1:] + (None,)
+                rows[r[0] - off * 3600] = (r[0] - off * 3600,) + r[1:]
     out = [rows[k] for k in sorted(rows)]
     if len(out) < 500:
         raise ValueError(f"{os.path.basename(path)}: only {len(out)} readable candles (check the column order: time, open, high, low, close)")

@@ -49,7 +49,7 @@ def run():
                 cells.setdefault(f"{nm}|{fd.session_of(bars[i]['t'])}|{tr}", []).append((i, r))
             rows_out = {k: st for k, v in cells.items() if len(v) >= 30 and (st := fd.summarize(v, n, RR, z=3.29))}
             markets[sym] = {"name": name, "basis": "price action only (spot has no volume), 5m" if not flow else "real taker delta, Binance 5m" if real else "candle-direction delta, Yahoo 5m",
-                            "history_candles": len(older) if older else 0,
+                            "history_candles": len(older) if older else 0, "history_real_flow": any(r[6] is not None for r in older[:2000]),
                             "bars": n, "days": round((bars[-1]["t"] - bars[0]["t"]) / 86400), "signals_tested": len(items), "overall": overall, "rows": rows_out}
             print(f"{sym}: {n} bars, {markets[sym]['days']} days, {len(items)} signals, {len(rows_out)} cells with n>=30")
         except Exception as e:
