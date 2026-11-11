@@ -21,7 +21,9 @@ TF = 300   # order-flow bar = 5 minutes (confirmation uses 1-minute data)
 CRYPTO = {"BTC-USD": "BTCUSDT"}
 BINANCE = ["https://data-api.binance.vision/api/v3/klines", "https://api.binance.com/api/v3/klines", "https://api.binance.us/api/v3/klines"]
 ROWS1M = {}   # 1-minute candles per symbol, used to measure the futures/spot basis
-SIG_DIR = {"Pulse BUY breakout": 1, "Pulse SELL breakout": -1, "Trapped sellers": 1, "Trapped buyers": -1, "CVD bullish divergence": 1, "CVD bearish divergence": -1}
+SIG_DIR = {"Pulse BUY breakout": 1, "Pulse SELL breakout": -1, "Trapped sellers": 1, "Trapped buyers": -1, "CVD bullish divergence": 1, "CVD bearish divergence": -1,
+           "Bullish engulfing": 1, "Bearish engulfing": -1, "Hammer": 1, "Shooting star": -1, "SSL sweep": 1, "BSL sweep": -1,
+           "SSL sweep+reversal": 1, "BSL sweep+reversal": -1}
 
 
 def get(url, params=None, tries=3):
@@ -125,7 +127,7 @@ def prep(bars):
     return a20, a50, cvd
 
 
-def detect(bars, a20, cvd, L=5):
+def detect(bars, a20, cvd, L=5, flow=True):   # flow=False: price only (spot has no real volume), the sweep+reversal combo then needs no delta
     """Signals with the bar index where they are CONFIRMED (no look-ahead): Pulse, traps, CVD divergence."""
     n, out = len(bars), []
     for i in range(10, n):
@@ -144,7 +146,52 @@ def detect(bars, a20, cvd, L=5):
         if bars[j]["l"] == min(x["l"] for x in w):
             if pl is not None and bars[j]["l"] < pl and cvd[j] > plc: out.append((j + L, "CVD bullish divergence"))
             pl, plc = bars[j]["l"], cvd[j]
+    atr = atr_series(bars)                                      # price action (confirmed on bar close, no look-ahead)
+    hi, lo, sw_up, sw_dn = [], [], -99, -99                     # unswept swing highs / lows = resting buy-side / sell-side liquidity
+    for i in range(1, n):
+        j = i - L
+        if j >= L:
+            w = bars[j - L:j + L + 1]
+            if bars[j]["h"] == max(x["h"] for x in w): hi = (hi + [bars[j]["h"]])[-8:]
+            if bars[j]["l"] == min(x["l"] for x in w): lo = (lo + [bars[j]["l"]])[-8:]
+        b, pv, a = bars[i], bars[i - 1], atr[i]
+        if not a: continue
+        body, rng = abs(b["c"] - b["o"]), b["h"] - b["l"]
+        up, dn = b["h"] - max(b["o"], b["c"]), min(b["o"], b["c"]) - b["l"]
+        eb = pv["c"] < pv["o"] and b["c"] > b["o"] and b["c"] >= pv["o"] and b["o"] <= pv["c"] and body >= .5 * a
+        es = pv["c"] > pv["o"] and b["c"] < b["o"] and b["c"] <= pv["o"] and b["o"] >= pv["c"] and body >= .5 * a
+        ham = rng >= .8 * a and dn >= 2 * body and dn >= .5 * rng and b["c"] - b["l"] >= .66 * rng
+        star = rng >= .8 * a and up >= 2 * body and up >= .5 * rng and b["h"] - b["c"] >= .66 * rng
+        bsl = [x for x in hi if b["h"] > x and b["c"] < x]       # wick above a swing high, close back below: buy-side liquidity taken
+        ssl = [x for x in lo if b["l"] < x and b["c"] > x]       # wick below a swing low, close back above: sell-side liquidity taken
+        hi = [x for x in hi if b["h"] <= x]                      # swept or broken levels are consumed
+        lo = [x for x in lo if b["l"] >= x]
+        if bsl: sw_up = i
+        if ssl: sw_dn = i
+        for ok, name in ((eb, "Bullish engulfing"), (es, "Bearish engulfing"), (ham, "Hammer"), (star, "Shooting star"), (bool(ssl), "SSL sweep"), (bool(bsl), "BSL sweep"),
+                         (i - sw_dn <= 1 and (b["d"] > 0 or not flow) and (eb or ham or (sw_dn == i - 1 and b["c"] > pv["h"])), "SSL sweep+reversal"),
+                         (i - sw_up <= 1 and (b["d"] < 0 or not flow) and (es or star or (sw_up == i - 1 and b["c"] < pv["l"])), "BSL sweep+reversal")):
+            if ok: out.append((i, name))
     return sorted(out, key=lambda x: x[0])
+
+
+def structure(bars, L=5):
+    """5m swing structure: unswept buy-side / sell-side liquidity above / below price and the HH+HL / LH+LL read."""
+    n, sh, sl = len(bars), [], []
+    for j in range(L, n - L):
+        w = bars[j - L:j + L + 1]
+        if bars[j]["h"] == max(x["h"] for x in w): sh.append((j, bars[j]["h"]))
+        if bars[j]["l"] == min(x["l"] for x in w): sl.append((j, bars[j]["l"]))
+    live_h = [q for j, q in sh if all(x["h"] <= q for x in bars[j + 1:])]
+    live_l = [q for j, q in sl if all(x["l"] >= q for x in bars[j + 1:])]
+    last = bars[-1]["c"]
+    bsl, ssl = sorted(q for q in live_h if q > last)[:3], sorted((q for q in live_l if q < last), reverse=True)[:3]
+    read = "range"
+    if len(sh) >= 2 and len(sl) >= 2:
+        hh, hl = sh[-1][1] > sh[-2][1], sl[-1][1] > sl[-2][1]
+        read = "bullish (HH+HL)" if hh and hl else "bearish (LH+LL)" if not hh and not hl else "range"
+    return {"read": read, "swing_high": round(sh[-1][1], 4) if sh else None, "swing_low": round(sl[-1][1], 4) if sl else None,
+            "bsl": [round(q, 4) for q in bsl], "ssl": [round(q, 4) for q in ssl]}
 
 
 def atr_series(bars, n=14):
@@ -163,15 +210,16 @@ def wilson(w, n, z=1.96):
     return (c - m) / d, (c + m) / d
 
 
-def simulate(bars, hold=24, rr=2.0):
+def simulate(bars, hold=24, rr=2.0, flow=True, extra=None, dirs=None):   # extra = more (bar index, name) signals, dirs = their directions
     """Replay every signal: enter at the next bar open, stop 1 ATR, target rr x ATR, max `hold` bars. Stop wins if both are touched.
     Returns [(bar index, signal name, result in R)]. No fees or slippage."""
     n = len(bars)
     if n < 200: return []
     a20, a50, cvd = prep(bars); atrs = atr_series(bars); items = []
-    for i, name in detect(bars, a20, cvd):
+    dmap = {**SIG_DIR, **(dirs or {})}
+    for i, name in sorted(detect(bars, a20, cvd, flow=flow) + (extra or []), key=lambda x: x[0]):
         if i + 2 >= n or not atrs[i]: continue
-        d, e, a = SIG_DIR[name], bars[i + 1]["o"], atrs[i]
+        d, e, a = dmap[name], bars[i + 1]["o"], atrs[i]
         stop, tgt, r = e - d * a, e + d * rr * a, None
         for b in bars[i + 1:i + 1 + hold]:
             if (b["l"] <= stop) if d == 1 else (b["h"] >= stop): r = -1.0; break
@@ -181,16 +229,21 @@ def simulate(bars, hold=24, rr=2.0):
     return items
 
 
+COST_R = 0.1   # assumed spread + slippage + fees per trade, in R (stop = 1 ATR)
+
+
 def summarize(items, n_bars, rr=2.0, z=1.96):
-    """items = [(bar index, r)]. edge is 'positive' only if the interval beats breakeven AND the last 30% of the data does too."""
-    be, rs = 1 / (1 + rr), [r for _, r in items]
-    oos = [r for i, r in items if i >= 0.7 * n_bars]
-    k, w = len(rs), sum(1 for x in rs if x > 0)
+    """items = [(bar index, r)]. The edge test uses the AVERAGE R net of COST_R (a timeout with a small gain is not a 'win' for expectancy):
+    positive = the interval of the mean R is above 0 AND the last 30% of the data is above 0 too; negative = interval below 0."""
+    k = len(items)
     if not k: return None
-    lo, hi = wilson(w, k, z); ow = sum(1 for x in oos if x > 0) / len(oos) if oos else 0
-    edge = ("unproven (n<30)" if k < 30 else "positive" if lo > be and len(oos) >= 10 and ow > be else "negative" if hi < be else "inconclusive")
-    return {"n": k, "win_pct": round(w / k * 100, 1), "ci": [round(lo * 100), round(hi * 100)], "avg_r": round(sum(rs) / k, 2),
-            "recent_win_pct": round(ow * 100, 1) if oos else None, "recent_n": len(oos), "edge": edge}
+    xs = [r - COST_R for _, r in items]; m = sum(xs) / k
+    se = (sum((x - m) ** 2 for x in xs) / (k - 1)) ** .5 / k ** .5 if k > 1 else 0
+    oos = [r - COST_R for i, r in items if i >= 0.7 * n_bars]; om = sum(oos) / len(oos) if oos else 0
+    w = sum(1 for _, r in items if r > 0); lo, hi = wilson(w, k, z); ow = sum(1 for i, r in items if i >= 0.7 * n_bars and r > 0) / len(oos) if oos else 0
+    edge = "unproven (n<30)" if k < 30 else "positive" if m - z * se > 0 and len(oos) >= 10 and om > 0 else "negative" if m + z * se < 0 else "inconclusive"
+    return {"n": k, "win_pct": round(w / k * 100, 1), "ci": [round(lo * 100), round(hi * 100)], "avg_r": round(m, 2), "avg_r_ci": [round(m - z * se, 2), round(m + z * se, 2)],
+            "recent_win_pct": round(ow * 100, 1) if oos else None, "recent_n": len(oos), "recent_avg_r": round(om, 2) if oos else None, "edge": edge}
 
 
 def session_of(t):
@@ -205,7 +258,7 @@ def order_flow(bars, atr_d, sma20=None):
     a20, a50, cvd = prep(bars)
     sigs = detect(bars, a20, cvd)
     ev = [{"t": stamp(bars[i]["t"]), "sig": nm, "session": session_of(bars[i]["t"]),
-           "trend": None if not sma20 else "with" if (SIG_DIR[nm] == 1) == (bars[i]["c"] > sma20) else "against"} for i, nm in sigs if i >= n - 12][-6:]
+           "trend": None if not sma20 else "with" if (SIG_DIR[nm] == 1) == (bars[i]["c"] > sma20) else "against"} for i, nm in sigs if i >= n - 12][-8:]
     L, walls = 5, []
     for j in range(L, n - L):                                   # 5) liquidity walls (volume-spike pivots)
         if bars[j]["v"] > 2 * a50[j]:
@@ -234,7 +287,7 @@ def order_flow(bars, atr_d, sma20=None):
         ks = sorted(g)[-2:]
         sessions[name] = {lbl: profile(g[k], r / 40) for lbl, k in zip(("prev", "cur") if len(ks) == 2 else ("cur",), ks)}
     atr5 = atr_series(bars)[-1]
-    return {"tf": "5m", "bars": n, "last_bar": stamp(bars[-1]["t"]), "atr5": round(atr5, 4) if atr5 else None,
+    return {"tf": "5m", "structure": structure(bars), "bars": n, "last_bar": stamp(bars[-1]["t"]), "atr5": round(atr5, 4) if atr5 else None,
             "delta": round(bars[-1]["d"]), "rel_delta": round(bars[-1]["d"] / a20[-1], 2) if a20[-1] else 0,
             "cvd": round(cvd[-1]), "cvd_chg_12": round(cvd[-1] - cvd[-13]), "signals": ev,
             "imbalance_zones": [{"side": z[0], "top": round(z[1], 4), "bottom": round(z[2], 4)} for z in zones[-4:]],
@@ -306,9 +359,11 @@ def match_stats(sym, signals):
     same signal + same session + same side of the daily trend. Falls back to all conditions when that cell has n<30."""
     try:
         with open("backtest.json", encoding="utf-8") as f:
-            bt = json.load(f)["markets"][sym]
+            allbt = json.load(f)["markets"]
+        bt = allbt[sym]
     except Exception:
         return None
+    sp = allbt.get("XAUUSD=X") if sym == "GC=F" else None      # same signal measured on the SPOT candles you trade (price action only)
     out = []
     for e in signals:
         key = f"{e['sig']}|{e['session']}|{e['trend']}"
@@ -316,7 +371,14 @@ def match_stats(sym, signals):
         if not row or row["n"] < 30:
             row, cell = bt["overall"].get(e["sig"]), "all conditions"
         if row:
-            out.append({"sig": e["sig"], "t": e["t"], "cell": cell, **row})
+            item = {"sig": e["sig"], "t": e["t"], "cell": cell, **row}
+            if sp:
+                srow, scell = sp["rows"].get(key), key
+                if not srow or srow["n"] < 30:
+                    srow, scell = sp["overall"].get(e["sig"]), "all conditions"
+                if srow:
+                    item["spot"] = {"cell": scell, **srow}
+            out.append(item)
     return {"basis": bt["basis"], "days": bt["days"], "stats": out}
 
 
@@ -367,7 +429,9 @@ def attach_spot(markets):
     of["spot"] = {"note": "XAUUSD spot level = GC futures level minus basis. Use these for spot trades.", "basis": round(b, 2), "basis_samples": bs["n"], "basis_spread": bs["spread"],
                   "vp200": prof(of["vp200"]), "sessions": {n: {k: prof(v) for k, v in d.items()} for n, d in of["sessions"].items()},
                   "imbalance_zones": [{**z, "top": r(z["top"]), "bottom": r(z["bottom"])} for z in of["imbalance_zones"]],
-                  "walls": [{**w, "price": r(w["price"])} for w in of["walls"]], "blocks": [{**x, "price": r(x["price"])} for x in of["blocks"]]}
+                  "walls": [{**w, "price": r(w["price"])} for w in of["walls"]], "blocks": [{**x, "price": r(x["price"])} for x in of["blocks"]],
+                  "structure": {**of["structure"], "swing_high": r(of["structure"]["swing_high"]), "swing_low": r(of["structure"]["swing_low"]),
+                                "bsl": [r(x) for x in of["structure"]["bsl"]], "ssl": [r(x) for x in of["structure"]["ssl"]]}}
     print(f"  spot basis GC - XAUUSD = {b:.2f} ({bs['n']} minutes, spread {bs['spread']})")
 
 

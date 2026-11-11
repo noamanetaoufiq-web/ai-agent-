@@ -64,3 +64,20 @@ Browser port of the Trading Swarm pipeline (the zip you sent): Macro/News -> Tec
 - Lot values (USD per 1.0 move per lot, spread, min lot) are typical CFD numbers: check them with your broker in the "Instrument specs" box.
 - It needs `backtest.json` (history) to approve anything: no historical evidence = no trade.
 - Optional Cloudflare Worker (`cloudflare/worker.js`) as a faster, more reliable Yahoo proxy for the browser: paste its URL in Access > Proxy URL.
+
+## Price-action confirmation (v2)
+- New signals, computed on confirmed 5m bars in `fetch_data.py` and, with identical results, in the browser: **Bullish/Bearish engulfing**, **Hammer / Shooting star**, **SSL sweep / BSL sweep** (liquidity taken beyond a swing low / high, closed back inside), **SSL/BSL sweep+reversal** (sweep + reversal candle + order-flow delta in that direction). `of.structure` gives the 5m swing read (HH+HL / LH+LL), the last swing high/low and the nearest unswept BSL / SSL (converted to spot for XAUUSD).
+- All of them are replayed by `backtest.py` (BTC ~365 days of 5m, others ~60 days), so each has its own win rate, 95% interval and last-30% check.
+- Swarm now has a **Confirmation (code)** step: 7 checks (sweep, reversal candle, order flow, 1-minute confirmation, 5m structure, daily trend, entry at a key level). A trade needs a trigger (sweep or reversal candle) and at least "Min confirmations" (default 4/7) before the backtest gate and the Monte Carlo run.
+
+## How the edge is judged (important)
+`edge` = **positive** only when the interval of the average R per trade, net of an assumed 0.1R cost, is above 0 **and** the last 30% of the data is also above 0. Tested on random-walk data: 0 of 86 signals came out positive in 3 runs (the first version, which counted small timeout gains as wins, gave false positives, so it was replaced). Real markets can still fool any backtest: signals cluster in time, spreads vary, and the past may not repeat.
+
+## XAUUSD spot backtest and your own history (history/ folder)
+- Spot gold has no real volume, so on **XAUUSD=X** the backtest replays only the **price-action signals** (engulfing, hammer / shooting star, SSL / BSL sweeps, sweep+reversal without the delta condition) on the spot candles you trade. Yahoo gives about 60 days of 5m; for more, drop your own export in `history/` (see `history/README.txt`). The workflow rebuilds the backtest when a history file is added or changed.
+- Gold order flow still comes from GC futures. Each active GC signal in `of.match` carries a `spot` entry with the same signal measured on spot; Swarm uses it for XAUUSD.
+- Tested: 5 file layouts parse to identical candles; 3 years of 5m (315k candles) -> 91k signals, all 8 spot signals above 1000 samples, 10 s.
+
+## Research on 10 years of real XAUUSD (research_xauusd.py)
+`python research_xauusd.py XAUUSDm15.csv` (the m15 file of the `historical-data` repo: 2012-05 to 2022-03, prices x100, tick volume only; scaling is detected). Walk-forward: TRAIN 2012-2017 picks, VALIDATION 2018-2019 confirms, FINAL 2020-2022 is the honest estimate. Fixed rule, never tuned: stop 1 ATR, target 2 ATR, 24 bars, cost 0.1R.
+Result on 144 combinations (8 price-action signals + previous-day high/low sweeps, on 15m/30m/1h/4h, with/against the daily trend): **1 passed train + validation and it lost -0.35R per trade in the final test; only 8 of 92 combinations were positive after costs in the final period.** On spot gold these signals alone had no edge. The `xauusd-backtest` repo's "70% win rate" is not an edge either: run on the same data its own recorded trades make +1.6 USD over 4714 trades before spread (average win +0.43 USD, average loss -1.52 USD).

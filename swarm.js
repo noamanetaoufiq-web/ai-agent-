@@ -75,13 +75,41 @@ function swInspect(plan, ctx, cfg, mk, macro) {   // hard rules, all in code
   return { approved: bad.length === 0, reasons: bad, warnings: warn, rr };
 }
 
-function swGate(match, dir) {   // backtest gate from the daily backtest (of.match): stats of the ACTIVE signals in the plan's direction
+function swLevels(P) {   // every named level the agents could use, in the trade instrument's price terms
+  const out = [], add = (v, name) => { v = swNum(v); if (v !== null) out.push({ v, name }); }, L = P.levels || {}, S = P.structure || {};
+  const prof = (p, n) => p && ['poc', 'vah', 'val'].forEach(k => add(p[k], `${n} ${k.toUpperCase()}`));
+  prof(L.vp200, 'VP200');
+  Object.entries(L.sessions || {}).forEach(([n, d]) => Object.entries(d || {}).forEach(([w, p]) => prof(p, `${n} ${w}`)));
+  (L.imbalance_zones || []).forEach(z => { add(z.top, `${z.side} imbalance top`); add(z.bottom, `${z.side} imbalance bottom`); });
+  (L.walls || []).forEach(w => add(w.price, `${w.side} wall`)); (L.blocks || []).forEach(b => add(b.price, 'block'));
+  add(S.swing_high, 'swing high'); add(S.swing_low, 'swing low'); (S.bsl || []).forEach(x => add(x, 'BSL')); (S.ssl || []).forEach(x => add(x, 'SSL'));
+  return out;
+}
+function swConfirm(ctx, plan, cfg) {   // price-action + order-flow confirmation checklist (code). Needs a TRIGGER (sweep or reversal candle) and enough checks.
+  const P = ctx.payload, long = plan.direction === 'LONG', dir = long ? 1 : -1, names = (P.signals || []).map(s => s.sig), has = l => names.some(n => l.includes(n));
+  const sweep = has(long ? ['SSL sweep', 'SSL sweep+reversal'] : ['BSL sweep', 'BSL sweep+reversal']);
+  const candle = has(long ? ['Bullish engulfing', 'Hammer', 'SSL sweep+reversal'] : ['Bearish engulfing', 'Shooting star', 'BSL sweep+reversal']);
+  const oppDiv = names.includes(long ? 'CVD bearish divergence' : 'CVD bullish divergence'), read = String((P.structure || {}).read || '');
+  const near = swLevels(P).map(x => ({ ...x, d: Math.abs(plan.entry - x.v) })).sort((a, b) => a.d - b.d)[0];
+  const checks = [
+    { name: `Liquidity sweep (${long ? 'SSL taken, bullish' : 'BSL taken, bearish'})`, pass: sweep, detail: sweep ? 'sweep in the last 12 bars' : 'no sweep in this direction' },
+    { name: 'Reversal candle (engulfing / pin bar)', pass: candle, detail: candle ? 'present' : 'none in this direction' },
+    { name: 'Order flow agrees (CVD, no opposing divergence)', pass: Math.sign(P.cvd_chg_12 || 0) === dir && !oppDiv, detail: `CVD change 12 bars ${P.cvd_chg_12}${oppDiv ? ', opposing divergence' : ''}` },
+    { name: '1-minute confirmation', pass: !!P.m1 && P.m1.dir === (long ? 'buy' : 'sell'), detail: P.m1 ? `1m aggressor ${P.m1.dir}, delta 5m ${P.m1.delta_5m}` : 'no 1m data' },
+    { name: '5m structure (or counter-trend with a sweep)', pass: read.startsWith(long ? 'bullish' : 'bearish') || sweep, detail: read || 'unknown' },
+    { name: 'Daily trend agrees', pass: !!P.ind && P.ind.trend === (long ? 'up' : 'down'), detail: `daily trend ${P.ind && P.ind.trend}` },
+    { name: 'Entry at a key level (within 0.5 x ATR5)', pass: !!near && near.d <= 0.5 * ctx.atr5, detail: near ? `nearest: ${near.name} ${swF(near.v)} (${swF(near.d / ctx.atr5, 2)} x ATR5)` : 'no levels' }];
+  const score = checks.filter(c => c.pass).length, trigger = sweep || candle, min = cfg.minConfirm ?? 4;
+  return { score, total: checks.length, min, trigger, checks, passed: trigger && score >= min };
+}
+
+function swGate(match, dir, preferSpot) {   // backtest gate from the daily backtest (of.match): stats of the ACTIVE signals in the plan's direction
   const want = dir === 'LONG' ? 1 : -1, rank = { positive: 3, inconclusive: 2, 'unproven (n<30)': 1, negative: 0 };
-  const stats = ((match && match.stats) || []).filter(s => SIGDIR[s.sig] === want);
+  const stats = ((match && match.stats) || []).filter(s => SIGDIR[s.sig] === want).map(s => (preferSpot && s.spot ? { sig: s.sig, t: s.t, ...s.spot, cell: s.spot.cell + ' [XAUUSD spot candles]' } : s));
   if (!stats.length) return { verdict: 'INSUFFICIENT_DATA', best: null, reasons: ['no active order-flow signal in this direction, so there is no historical evidence for this setup'] };
-  const best = [...stats].sort((a, b) => (rank[b.edge] - rank[a.edge]) || (b.n - a.n))[0], be = 100 / 3;
-  const v = best.edge === 'positive' ? 'GOOD' : best.edge === 'negative' ? 'BAD' : best.edge === 'inconclusive' && best.win_pct > be ? 'MARGINAL' : best.edge === 'unproven (n<30)' ? 'INSUFFICIENT_DATA' : 'BAD';
-  return { verdict: v, best, reasons: [`${best.sig} (${best.cell}): n=${best.n}, win ${best.win_pct}% (interval ${best.ci[0]}-${best.ci[1]}%), edge ${best.edge}`] };
+  const best = [...stats].sort((a, b) => (rank[b.edge] - rank[a.edge]) || (b.n - a.n))[0];
+  const v = best.edge === 'positive' ? 'GOOD' : best.edge === 'negative' ? 'BAD' : best.edge === 'inconclusive' && best.avg_r > 0 ? 'MARGINAL' : best.edge === 'unproven (n<30)' ? 'INSUFFICIENT_DATA' : 'BAD';
+  return { verdict: v, best, reasons: [`${best.sig} (${best.cell}): n=${best.n}, win ${best.win_pct}% (interval ${best.ci[0]}-${best.ci[1]}%), avg ${best.avg_r}R net of cost, edge ${best.edge}`] };
 }
 
 function swSimulate(bars, plan, price, mk, runs = 5000, rnd = Math.random) {
@@ -132,8 +160,9 @@ function swValidate(sim, gate) {   // verdict in code: GOOD = historical edge be
   return { verdict: v, reasons };
 }
 
-function swFinal({ plan, insp, gate, val, audit, cfg, mk }) {
+function swFinal({ plan, insp, conf, gate, val, audit, cfg, mk }) {
   const why = [...insp.reasons];
+  if (conf && !conf.passed) why.push(`confirmation ${conf.score}/${conf.total} (need ${conf.min})${conf.trigger ? '' : ', and no liquidity sweep or reversal candle in this direction'}`);
   if (gate && !['GOOD', 'MARGINAL'].includes(gate.verdict)) why.push(`backtest gate ${gate.verdict}: ${gate.reasons.join('; ')}`);
   if (val && val.verdict === 'BAD') why.push(`trade validator BAD: ${val.reasons.join('; ')}`);
   if (audit && audit.veto) why.push('LLM audit vetoed: ' + (audit.concerns || []).slice(0, 3).join('; '));
@@ -145,7 +174,7 @@ function swFinal({ plan, insp, gate, val, audit, cfg, mk }) {
 }
 
 /* ============================ agents (LLM) ============================ */
-const SW_TECH = `You are the Technical agent of a trading swarm. Use ONLY the data given. Every price you output must be in the trade instrument's own price terms and close to the live price (within 30 x atr5). Never invent levels: take entry, stop and target from the given levels (levels.vp200, levels.sessions, levels.imbalance_zones, levels.walls, levels.blocks, ind.hi30/lo30) or from the live price +/- multiples of atr5. Stop distance 0.5-4 x atr5. Reward:risk at least 2. Order flow: use signals, delta, cvd_chg_12, m1 (1-minute confirmation) and match (historical stats of the active signals). Delta is an estimate unless real_delta is true. If there is no clean setup, answer setup NONE.
+const SW_TECH = `You are the Technical agent of a trading swarm. Use ONLY the data given. Every price you output must be in the trade instrument's own price terms and close to the live price (within 30 x atr5). Never invent levels: take entry, stop and target from the given levels (levels.vp200, levels.sessions, levels.imbalance_zones, levels.walls, levels.blocks, ind.hi30/lo30) or from the live price +/- multiples of atr5. Stop distance 0.5-4 x atr5. Reward:risk at least 2. A valid setup needs a TRIGGER in the plan's direction: a liquidity sweep (SSL sweep for longs, BSL sweep for shorts) and/or a reversal candle (engulfing, hammer / shooting star), ideally the sweep+reversal signal, plus order-flow agreement. Entry near a level (swept level, POC/VAH/VAL, imbalance edge); stop beyond the swept liquidity or swing (structure.swing_high / swing_low); target the next UNSWEPT liquidity (structure.bsl for longs, structure.ssl for shorts) or VAH/VAL/POC. Order flow: use signals, delta, cvd_chg_12, m1 (1-minute confirmation) and match (historical stats of the active signals). If signals has no trigger in your direction, answer setup NONE. Delta is an estimate unless real_delta is true. If there is no clean setup, answer setup NONE.
 Return ONLY this JSON: {"bias":"BULLISH|BEARISH|NEUTRAL","htf_bias":"BULLISH|BEARISH|NEUTRAL","setup":"LONG|SHORT|NONE","entry":number|null,"stop_loss":number|null,"take_profit":number|null,"confidence":0-100,"zone_type":"POC|VAH|VAL|IMBALANCE|WALL|BLOCK|OTHER","reasoning":["..."],"invalidation":"..."}`;
 const SW_MACRO = `You are the Macro and News agent of a trading swarm. If you can search the web, check today's high-impact events (CPI, FOMC, NFP, central banks, geopolitics) for the next 2 hours and the dominant driver of this instrument; set freeze_trading true when a high-impact event is imminent. If you cannot search, say so in summary and base the read on cross_markets only. Never invent events.
 Return ONLY this JSON: {"regime":"RISK_ON|RISK_OFF|NEUTRAL","asset_bias":"BULLISH|BEARISH|NEUTRAL","freeze_trading":true|false,"key_events":["..."],"summary":"..."}`;
@@ -170,7 +199,7 @@ function swContext(key, cfg) {   // everything the agents may see, in the TRADE 
   if (m1 && sp && m1.last_close_spot !== undefined) m1.last_close = m1.last_close_spot;
   const ctx = { instrument: key, price: T.price, atr5: of.atr5, age: of.age_min, hasFlow: true, hasSpot: !!sp || !mk.spot, real_delta: of.real_delta };
   ctx.payload = { instrument: key, quote_currency: 'USD', live_price: T.price, atr5: of.atr5, data_age_min: of.age_min, real_delta: of.real_delta, ind: (T.indicators || A.indicators), signals: of.signals, delta: of.delta, rel_delta: of.rel_delta, cvd_chg_12: of.cvd_chg_12,
-    m1, levels: { vp200: lv.vp200, sessions: lv.sessions, imbalance_zones: lv.imbalance_zones, walls: lv.walls, blocks: lv.blocks }, match: of.match,
+    m1, structure: lv.structure, levels: { vp200: lv.vp200, sessions: lv.sessions, imbalance_zones: lv.imbalance_zones, walls: lv.walls, blocks: lv.blocks }, match: of.match,
     cross_markets: ms.filter(m => m.symbol !== mk.analysis && m.symbol !== mk.trade).map(m => ({ name: m.name, price: m.price, change_pct: m.change_pct, rsi14: m.indicators && m.indicators.rsi14, trend: m.indicators && m.indicators.trend })) };
   ctx.match = of.match; ctx.mk = mk;
   return ctx;
@@ -206,7 +235,11 @@ async function swRun(cfg, key, ui) {
   res.insp = swInspect(P, ctx, cfg, mk, res.macro);
   S('insp', 'Inspector (code)', res.insp.approved ? 'ok' : 'bad', res.insp.approved ? `all hard rules passed, R:R ${swF(res.insp.rr)}${res.insp.warnings.length ? ' | ' + res.insp.warnings.join('; ') : ''}` : res.insp.reasons.join(' | '));
   if (P.decision === 'TRADE' && res.insp.approved) {
-    res.gate = swGate(ctx.match, P.direction);
+    res.conf = swConfirm(ctx, P, cfg);
+    S('conf', 'Confirmation (code)', res.conf.passed ? 'ok' : 'bad', `${res.conf.score}/${res.conf.total} checks (need ${res.conf.min}${res.conf.trigger ? '' : ', no sweep/reversal trigger'}): ` + res.conf.checks.map(c => (c.pass ? '✓ ' : '✗ ') + c.name).join(' | '), res.conf.checks);
+  }
+  if (res.conf && res.conf.passed) {
+    res.gate = swGate(ctx.match, P.direction, mk.spot);
     S('gate', 'Backtest gate (code)', ['GOOD', 'MARGINAL'].includes(res.gate.verdict) ? 'ok' : 'bad', `${res.gate.verdict}: ${res.gate.reasons.join('; ')}`, res.gate.best);
     if (['GOOD', 'MARGINAL'].includes(res.gate.verdict)) {
       S('val', 'Trade validator (Monte Carlo)', 'run', 'simulating 5000 paths...');
@@ -224,7 +257,7 @@ async function swRun(cfg, key, ui) {
       }
     }
   }
-  res.final = swFinal({ plan: P, insp: res.insp, gate: res.gate, val: res.val, audit: res.audit, cfg, mk });
+  res.final = swFinal({ plan: P, insp: res.insp, conf: res.conf, gate: res.gate, val: res.val, audit: res.audit, cfg, mk });
   return res;
 }
 
@@ -233,6 +266,7 @@ function swReport(r) {   // built by code, not by the LLM
   if (P) L.push(`Plan: ${P.direction} entry ${swF(P.entry)}, stop ${swF(P.stop_loss)}, target ${swF(P.take_profit)}, R:R ${swF(r.insp && r.insp.rr)}, confidence ${P.confidence}`);
   if (f.sizing && f.sizing.lots) L.push(`Size: ${f.sizing.lots} lots, risk $${f.sizing.risk_usd} (${f.sizing.risk_pct}% of $${r.cfg.equity})${f.risk_mult === 0.5 ? ', REDUCED risk (marginal evidence)' : ''}`);
   if (f.reasons.length) { L.push('', '**Why not:**'); f.reasons.forEach(x => L.push('- ' + x)); }
+  if (r.conf) { L.push('', `**Confirmation ${r.conf.score}/${r.conf.total}:**`); r.conf.checks.forEach(c => L.push(`${c.pass ? '✓' : '✗'} ${c.name}: ${c.detail}`)); }
   if (r.gate && r.gate.best) L.push('', `**History:** ${r.gate.reasons[0]}`);
   if (r.sim) { L.push('', '**Monte Carlo (luck baseline, costs in):**'); r.sim.ladder.forEach(x => L.push(`${x.runs} runs: fill ${x.fill_pct}%, win ${x.win_pct}% (${x.ci[0]}-${x.ci[1]}%), expectancy ${x.expectancy_r}R`)); }
   if (r.insp && r.insp.warnings.length) L.push('', '**Warnings:** ' + r.insp.warnings.join('; '));
@@ -243,7 +277,7 @@ function swReport(r) {   // built by code, not by the LLM
 
 /* ---- UI ---- */
 function swCfg() {
-  const d = { equity: 10000, riskPct: 1, minRR: 2, conf: 60, maxAge: 30, audit: true, markets: {} };
+  const d = { equity: 10000, riskPct: 1, minRR: 2, conf: 60, minConfirm: 4, maxAge: 30, audit: true, markets: {} };
   try { return { ...d, ...JSON.parse(localStorage.getItem(SW.KEY) || '{}') }; } catch { return d; }
 }
 const swSave = c => { try { localStorage.setItem(SW.KEY, JSON.stringify(c)); } catch { /* ignore */ } };
@@ -261,6 +295,7 @@ function swInitUI() {
       <label>Risk % <input id="swRisk" type="number" min="0.05" max="5" step="0.05"></label>
       <label>Min R:R <input id="swRR" type="number" min="1" step="0.1"></label>
       <label>Min confidence <input id="swConf" type="number" min="0" max="100" step="5"></label>
+      <label>Min confirmations (of 7) <input id="swConfirm" type="number" min="1" max="7" step="1"></label>
       <label class="sw-chk"><input id="swAudit" type="checkbox"> LLM audit</label>
     </div>
     <details><summary>Instrument specs (check with your broker)</summary>
@@ -279,12 +314,12 @@ function swInitUI() {
   $('#openVault').before(btn);
   const fill = () => {
     const cfg = swCfg(), mk = swMarket(cfg, g('swMarket').value);
-    g('swEquity').value = cfg.equity; g('swRisk').value = cfg.riskPct; g('swRR').value = cfg.minRR; g('swConf').value = cfg.conf; g('swAudit').checked = cfg.audit;
+    g('swEquity').value = cfg.equity; g('swRisk').value = cfg.riskPct; g('swRR').value = cfg.minRR; g('swConf').value = cfg.conf; g('swConfirm').value = cfg.minConfirm; g('swAudit').checked = cfg.audit;
     g('swUpp').value = mk.upp; g('swSpread').value = mk.spread; g('swSlip').value = mk.slip; g('swMin').value = mk.minLot; g('swStep').value = mk.step;
   };
   const read = () => {
     const cfg = swCfg(), key = g('swMarket').value, n = (id, d) => swNum(g(id).value) ?? d;
-    Object.assign(cfg, { equity: n('swEquity', 10000), riskPct: n('swRisk', 1), minRR: n('swRR', 2), conf: n('swConf', 60), audit: g('swAudit').checked });
+    Object.assign(cfg, { equity: n('swEquity', 10000), riskPct: n('swRisk', 1), minRR: n('swRR', 2), conf: n('swConf', 60), minConfirm: n('swConfirm', 4), audit: g('swAudit').checked });
     cfg.markets = { ...cfg.markets, [key]: { upp: n('swUpp', 1), spread: n('swSpread', 0), slip: n('swSlip', 0), minLot: n('swMin', 0.01), step: n('swStep', 0.01) } };
     swSave(cfg); return cfg;
   };

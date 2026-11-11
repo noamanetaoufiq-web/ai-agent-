@@ -434,7 +434,8 @@ function drawChart() {
 
 /* ---------- live prices + order flow: recomputed in the browser every 60 s and right before every message ---------- */
 const LIVE_MS = 60000, QUOTE_MS = 15000; let liveTimer = 0, quoteTimer = 0, livePromise = null, wsAt = 0;
-const SIGDIR = { 'Pulse BUY breakout': 1, 'Pulse SELL breakout': -1, 'Trapped sellers': 1, 'Trapped buyers': -1, 'CVD bullish divergence': 1, 'CVD bearish divergence': -1 };
+const SIGDIR = { 'Pulse BUY breakout': 1, 'Pulse SELL breakout': -1, 'Trapped sellers': 1, 'Trapped buyers': -1, 'CVD bullish divergence': 1, 'CVD bearish divergence': -1,
+  'Bullish engulfing': 1, 'Bearish engulfing': -1, 'Hammer': 1, 'Shooting star': -1, 'SSL sweep': 1, 'BSL sweep': -1, 'SSL sweep+reversal': 1, 'BSL sweep+reversal': -1 };
 const YF = s => `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(s)}`;
 const PROXY = u => (load('aicc.proxy', '') || 'https://api.allorigins.win/raw') + '?url=' + encodeURIComponent(u);   // your own Cloudflare Worker (cloudflare/worker.js) if set   // public CORS proxy, fallback only
 async function getJSON(urls) {
@@ -492,7 +493,50 @@ function detectSigs(bars) {
     if (bars[j].h === Math.max(...w.map(x => x.h))) { if (ph !== null && bars[j].h > ph && cv[j] < pc) out.push([j + L, 'CVD bearish divergence']); ph = bars[j].h; pc = cv[j]; }
     if (bars[j].l === Math.min(...w.map(x => x.l))) { if (pl !== null && bars[j].l < pl && cv[j] > plc) out.push([j + L, 'CVD bullish divergence']); pl = bars[j].l; plc = cv[j]; }
   }
+  const atr = atrSeries(bars); let hi = [], lo = [], swUp = -99, swDn = -99;   // price action, same rules as fetch_data.py
+  for (let i = 1; i < n; i++) {
+    const j = i - L;
+    if (j >= L) {
+      const w = bars.slice(j - L, j + L + 1);
+      if (bars[j].h === Math.max(...w.map(x => x.h))) hi = [...hi, bars[j].h].slice(-8);
+      if (bars[j].l === Math.min(...w.map(x => x.l))) lo = [...lo, bars[j].l].slice(-8);
+    }
+    const b = bars[i], pv = bars[i - 1], a = atr[i]; if (!a) continue;
+    const body = Math.abs(b.c - b.o), rng = b.h - b.l, up = b.h - Math.max(b.o, b.c), dn = Math.min(b.o, b.c) - b.l;
+    const eb = pv.c < pv.o && b.c > b.o && b.c >= pv.o && b.o <= pv.c && body >= .5 * a, es = pv.c > pv.o && b.c < b.o && b.c <= pv.o && b.o >= pv.c && body >= .5 * a;
+    const ham = rng >= .8 * a && dn >= 2 * body && dn >= .5 * rng && b.c - b.l >= .66 * rng, star = rng >= .8 * a && up >= 2 * body && up >= .5 * rng && b.h - b.c >= .66 * rng;
+    const bsl = hi.some(x => b.h > x && b.c < x), ssl = lo.some(x => b.l < x && b.c > x);
+    hi = hi.filter(x => b.h <= x); lo = lo.filter(x => b.l >= x);
+    if (bsl) swUp = i;
+    if (ssl) swDn = i;
+    [[eb, 'Bullish engulfing'], [es, 'Bearish engulfing'], [ham, 'Hammer'], [star, 'Shooting star'], [ssl, 'SSL sweep'], [bsl, 'BSL sweep'],
+      [i - swDn <= 1 && b.d > 0 && (eb || ham || (swDn === i - 1 && b.c > pv.h)), 'SSL sweep+reversal'],
+      [i - swUp <= 1 && b.d < 0 && (es || star || (swUp === i - 1 && b.c < pv.l)), 'BSL sweep+reversal']].forEach(([ok, nm]) => { if (ok) out.push([i, nm]); });
+  }
   return { sigs: out.sort((x, y) => x[0] - y[0]), cvd: cv, avg };
+}
+function atrSeries(bars, n = 14) {
+  const out = new Array(bars.length).fill(null); let a = null, sum = 0;
+  for (let i = 1; i < bars.length; i++) {
+    const pc = bars[i - 1].c, tr = Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - pc), Math.abs(bars[i].l - pc));
+    if (i <= n) sum += tr;
+    if (i === n) a = sum / n; else if (i > n) a = (a * (n - 1) + tr) / n;
+    out[i] = a;
+  }
+  return out;
+}
+function swingStructure(bars, L = 5) {   // unswept buy-side / sell-side liquidity and the HH+HL / LH+LL read
+  const n = bars.length, sh = [], sl = [], r = x => Math.round(x * 1e4) / 1e4;
+  for (let j = L; j < n - L; j++) {
+    const w = bars.slice(j - L, j + L + 1);
+    if (bars[j].h === Math.max(...w.map(x => x.h))) sh.push([j, bars[j].h]);
+    if (bars[j].l === Math.min(...w.map(x => x.l))) sl.push([j, bars[j].l]);
+  }
+  const liveH = sh.filter(([j, q]) => bars.slice(j + 1).every(x => x.h <= q)).map(x => x[1]), liveL = sl.filter(([j, q]) => bars.slice(j + 1).every(x => x.l >= q)).map(x => x[1]), last = bars[n - 1].c;
+  let read = 'range';
+  if (sh.length >= 2 && sl.length >= 2) { const hh = sh[sh.length - 1][1] > sh[sh.length - 2][1], hl = sl[sl.length - 1][1] > sl[sl.length - 2][1]; read = hh && hl ? 'bullish (HH+HL)' : !hh && !hl ? 'bearish (LH+LL)' : 'range'; }
+  return { read, swing_high: sh.length ? r(sh[sh.length - 1][1]) : null, swing_low: sl.length ? r(sl[sl.length - 1][1]) : null,
+    bsl: liveH.filter(q => q > last).sort((a, b) => a - b).slice(0, 3).map(r), ssl: liveL.filter(q => q < last).sort((a, b) => b - a).slice(0, 3).map(r) };
 }
 function atrLast(bars, n = 14) {
   if (bars.length <= n) return null;
@@ -505,9 +549,9 @@ function computeFlow(m, rows) {
   const bars = aggBars(rows, 300), n = bars.length;
   if (n < 60 || !bars.some(b => b.v > 0)) return null;
   const { sigs, cvd, avg } = detectSigs(bars), sma = m.indicators && m.indicators.sma20, st = t => new Date(t * 1000).toISOString().slice(5, 16).replace('T', ' ');
-  const signals = sigs.filter(([i]) => i >= n - 12).slice(-6).map(([i, nm]) => ({ t: st(bars[i].t), sig: nm, session: sessionOf(bars[i].t), trend: !sma ? null : ((SIGDIR[nm] === 1) === (bars[i].c > sma) ? 'with' : 'against') }));
+  const signals = sigs.filter(([i]) => i >= n - 12).slice(-8).map(([i, nm]) => ({ t: st(bars[i].t), sig: nm, session: sessionOf(bars[i].t), trend: !sma ? null : ((SIGDIR[nm] === 1) === (bars[i].c > sma) ? 'with' : 'against') }));
   const m1 = aggBars(rows, 60), sum = a => a.reduce((s, b) => s + b.buy - b.sell, 0), d5 = sum(m1.slice(-5)), last = bars[n - 1], a = atrLast(bars);
-  return { signals, delta: Math.round(last.d), rel_delta: avg[n - 1] ? Math.round(last.d / avg[n - 1] * 100) / 100 : 0, cvd: Math.round(cvd[n - 1]), cvd_chg_12: Math.round(cvd[n - 1] - cvd[n - 13]),
+  return { signals, structure: swingStructure(bars), delta: Math.round(last.d), rel_delta: avg[n - 1] ? Math.round(last.d / avg[n - 1] * 100) / 100 : 0, cvd: Math.round(cvd[n - 1]), cvd_chg_12: Math.round(cvd[n - 1] - cvd[n - 13]),
     atr5: a ? Math.round(a * 1e4) / 1e4 : null, last_bar: st(last.t), real_delta: rows[rows.length - 1][6] != null, age_min: Math.round((Date.now() / 1000 - rows[rows.length - 1][0]) / 60),
     m1: { delta_5m: Math.round(d5), delta_15m: Math.round(sum(m1.slice(-15))), dir: d5 > 0 ? 'buy' : d5 < 0 ? 'sell' : 'flat', last_close: m1[m1.length - 1].c, last_1m: st(m1[m1.length - 1].t) } };
 }
@@ -516,7 +560,10 @@ function matchStats(sym, signals) {   // historical stats (backtest.json) of the
   const stats = signals.map(e => {
     const key = `${e.sig}|${e.session}|${e.trend}`; let row = bt.rows[key], cell = key;
     if (!row || row.n < 30) { row = bt.overall[e.sig]; cell = 'all conditions'; }
-    return row ? { sig: e.sig, t: e.t, cell, ...row } : null;
+    if (!row) return null;
+    const item = { sig: e.sig, t: e.t, cell, ...row }, sp = sym === 'GC=F' && state.bt.markets['XAUUSD=X'];   // same signal measured on the spot candles
+    if (sp) { let sr = sp.rows[key], sc = key; if (!sr || sr.n < 30) { sr = sp.overall[e.sig]; sc = 'all conditions'; } if (sr) item.spot = { cell: sc, ...sr }; }
+    return item;
   }).filter(Boolean);
   return { basis: bt.basis, days: bt.days, stats };
 }
@@ -537,7 +584,8 @@ async function doRefresh(force, quotesOnly) {
       if (last && last.d === d) last.c = q.price; else m.history.push({ d, c: q.price });
     }
     const f = rows && m.orderflow ? computeFlow(m, rows) : null;
-    if (f) { Object.assign(m.orderflow, f, { live: true }); const sp = m.orderflow.spot; if (sp && m.orderflow.m1) m.orderflow.m1.last_close_spot = Math.round((m.orderflow.m1.last_close - sp.basis) * 100) / 100; m.orderflow.match = matchStats(m.symbol, f.signals); flow++; }
+    if (f) { Object.assign(m.orderflow, f, { live: true }); const sp = m.orderflow.spot; if (sp && m.orderflow.m1) m.orderflow.m1.last_close_spot = Math.round((m.orderflow.m1.last_close - sp.basis) * 100) / 100;
+      if (sp && f.structure) { const r = x => (x == null ? null : Math.round((x - sp.basis) * 100) / 100); sp.structure = { ...f.structure, swing_high: r(f.structure.swing_high), swing_low: r(f.structure.swing_low), bsl: f.structure.bsl.map(r), ssl: f.structure.ssl.map(r) }; } m.orderflow.match = matchStats(m.symbol, f.signals); flow++; }
   }));
   if (!ok && !flow) return;   // keep what data.json shows
   state.liveAt = Date.now(); if (!quotesOnly) state.flowN = flow;
@@ -647,9 +695,9 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) flush
 
 /* ---------- agent modes (system prompt presets) ---------- */
 const DATA_GUIDE = `Market data fields: price, change_pct (vs previous close), last7 (last 7 daily closes). ind = daily indicators (rsi14, sma20, sma50, atr14, hi30/lo30 = 30-day range, chg5d_pct, trend).
-of = order flow on 5-minute bars (tf). real_delta=true means buy/sell volume is REAL aggressor volume from the exchange (Binance taker volume, BTC). real_delta=false means an ESTIMATE from candles (up-close candle = buy volume), a proxy and NOT a footprint or DOM. age_min = minutes since the last candle: futures from Yahoo (Gold GC, Nasdaq NQ) are about 10-15 min late, so give levels, zones and conditional plans, not instant entries. atr5 = 5m ATR. delta = buy minus sell volume of the last bar; rel_delta = delta / 20-bar average volume; cvd = cumulative delta; cvd_chg_12 = CVD change over 12 bars. signals = recent Pulse breakouts/traps and CVD divergences (confirmed bars only). imbalance_zones = unmitigated 3x buy/sell zones. walls = volume-spike swing highs/lows not yet broken (liquidity proxy). blocks = recent high-volume bars. vp200 = POC/VAH/VAL of the last 200 bars. sessions = POC/VAH/VAL of previous (prev) and current (cur) Daily, Asian (00-08 UTC), London (08-16) and New York (13-21).
+of = order flow on 5-minute bars (tf). real_delta=true means buy/sell volume is REAL aggressor volume from the exchange (Binance taker volume, BTC). real_delta=false means an ESTIMATE from candles (up-close candle = buy volume), a proxy and NOT a footprint or DOM. age_min = minutes since the last candle: futures from Yahoo (Gold GC, Nasdaq NQ) are about 10-15 min late, so give levels, zones and conditional plans, not instant entries. atr5 = 5m ATR. delta = buy minus sell volume of the last bar; rel_delta = delta / 20-bar average volume; cvd = cumulative delta; cvd_chg_12 = CVD change over 12 bars. signals = recent confirmed-bar signals: Pulse breakouts/traps, CVD divergences and price action (Bullish/Bearish engulfing, Hammer, Shooting star, SSL sweep = sell-side liquidity taken below a swing low and closed back above (bullish), BSL sweep = buy-side liquidity taken above a swing high and closed back below (bearish), and SSL/BSL sweep+reversal = a sweep followed by a reversal candle WITH order-flow delta in the reversal direction). structure = 5m swing read (bullish HH+HL, bearish LH+LL, range), last swing_high/swing_low and the nearest UNSWEPT liquidity: bsl (above price) and ssl (below price); these are natural targets and stop zones. imbalance_zones = unmitigated 3x buy/sell zones. walls = volume-spike swing highs/lows not yet broken (liquidity proxy). blocks = recent high-volume bars. vp200 = POC/VAH/VAL of the last 200 bars. sessions = POC/VAH/VAL of previous (prev) and current (cur) Daily, Asian (00-08 UTC), London (08-16) and New York (13-21).
 m1 = 1-MINUTE CONFIRMATION: delta_5m and delta_15m = sum of 1-minute delta over the last 5/15 minutes, dir = who is aggressive now, last_close.
-match = HISTORICAL STATS of the signals active now (from a daily backtest of every signal: Binance 5m for about 1 year on BTC, Yahoo 5m for about 60 days on the others; see basis and days). Each entry: sig, t, cell (same signal + same session + with/against the daily trend, or "all conditions" when that cell has fewer than 30 cases), n samples, win_pct, ci (interval: 99.9% for cells, 95% for all conditions), avg_r, recent_win_pct (last 30% of the data), edge = positive / inconclusive / negative / unproven (n<30). Rule: enter at next bar open, stop 1 x atr5, target 2 x atr5, max 24 bars, no fees or slippage, so breakeven win rate is 33%. Signals cluster in time and the past may not repeat, so "positive" is weak evidence, never proof. Each signal in of.signals also has session (asian/london/ny/late, UTC) and trend (with/against the daily SMA20).
+match = HISTORICAL STATS of the signals active now (from a daily backtest of every signal: Binance 5m for about 1 year on BTC, Yahoo 5m for about 60 days on the others; see basis and days). Each entry: sig, t, cell (same signal + same session + with/against the daily trend, or "all conditions" when that cell has fewer than 30 cases), n samples, win_pct, ci (interval of the win rate), avg_r (average R per trade NET of an assumed 0.1R cost) and avg_r_ci, recent_win_pct / recent_avg_r (last 30% of the data), edge = positive (average R interval above 0 AND the last 30% positive) / inconclusive / negative / unproven (n<30). Rule: enter at next bar open, stop 1 x atr5, target 2 x atr5, max 24 bars; a timeout with a small gain counts as a win in win_pct but not in avg_r, so judge the edge by avg_r, not by win_pct. Signals cluster in time and the past may not repeat, so "positive" is weak evidence, never proof. In the GC market each entry may also have spot = the same signal measured on the XAUUSD SPOT candles (price action only, longer history when the user added one): for XAUUSD trades prefer the spot numbers. Each signal in of.signals also has session (asian/london/ny/late, UTC) and trend (with/against the daily SMA20).
 meta = freshness. data_json_updated = the 15-minute file (ind, walls, imbalance_zones, blocks, vp200, sessions come from it). browser_refresh = recomputed in the browser each minute and right before this message (price, change_pct, and of.delta, rel_delta, cvd, cvd_chg_12, atr5, signals, m1, match). backtest_generated = when the historical stats were built; "MISSING" means NO historical stats exist: say win rates are unknown, never rate a setup above Low, and tell the user to run the "Daily backtest" GitHub Action. Mention the data age you rely on.
 GOLD: the user TRADES spot XAUUSD (market "Gold spot (XAUUSD)") but order flow only exists on GC futures. of.spot (inside the GC market) has the same levels already converted to spot (futures level minus basis, measured on the same minutes), and of.m1.last_close_spot is the last GC price in spot terms. For any XAUUSD entry, stop or target use ONLY of.spot levels and last_close_spot, never raw GC levels. State the basis and basis_spread. If of.spot is missing, say the conversion is unavailable and give no XAUUSD levels. The spot market has no volume of its own; its ind (RSI, SMA, ATR) comes from real spot daily history. Futures roll to a new contract changes the basis, so be careful near roll dates.\nA market without "of" has no usable volume (for example EUR/USD).`;
 const COMMON = `Rules: base every answer on the market data in this chat and quote exact numbers. Every price you give must be within 30 x atr5 of that market's current price field; a level you remember that is far from it is wrong, never use it. Never invent prices, news, indicators or win rates: the only win rates you may quote are the ones in of.match, with n and the interval. If there is no match entry or n<30, say the win rate is unknown. Never promise profit. Give the main risk and the invalidation. Answer in the user's language (Darija, Arabic, French or English), short and structured. End with: Not financial advice.`;
@@ -675,7 +723,7 @@ function initModes() {
   const sel = $('#modeSelect');
   sel.innerHTML = Object.entries(MODES).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
   sel.value = MODES[load('aicc.mode', 'trading')] ? load('aicc.mode', 'trading') : 'trading';
-  if (!$('#systemPrompt').value.trim() || load('aicc.modeVer', '') !== '7') { applyMode(sel.value, true); save('aicc.modeVer', '7'); }   // first visit: preload the prompt, never overwrite your own text
+  if (!$('#systemPrompt').value.trim() || load('aicc.modeVer', '') !== '9') { applyMode(sel.value, true); save('aicc.modeVer', '9'); }   // first visit: preload the prompt, never overwrite your own text
   sel.onchange = () => applyMode(sel.value, true);
   const px = $('#proxyUrl'); if (px) { px.value = load('aicc.proxy', ''); px.onchange = () => save('aicc.proxy', px.value.trim()); }
 }
